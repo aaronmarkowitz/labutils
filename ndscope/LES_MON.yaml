@@ -3,6 +3,13 @@ font-size: 10
 grid-alpha: 0.2
 plots:
 - channels:
+    Y1:DMD-LESX_PIT_IN1_DQ:
+      color: '#1f77b4'
+      label: null
+      offset: 0.0
+      scale: 1.0
+      unit: null
+      width: 1
     Y1:DMD-LESZ_PIT_IN1_DQ:
       color: '#2ca02c'
       label: null
@@ -16,6 +23,13 @@ plots:
   rowspan: 1
   y-range: auto
 - channels:
+    Y1:DMD-LESX_YAW_IN1_DQ:
+      color: '#ff7f0e'
+      label: null
+      offset: 0.0
+      scale: 1.0
+      unit: null
+      width: 1
     Y1:DMD-LESZ_YAW_IN1_DQ:
       color: '#d62728'
       label: null
@@ -48,7 +62,27 @@ plots:
   row: 2
   rowspan: 1
   y-range: auto
-t0: 1440890125.9375
+- channels:
+    Y1:DMD-LASER_POX_IN1_DQ:
+      color: '#7f7f7f'
+      label: null
+      offset: 0.0
+      scale: 1.0
+      unit: null
+      width: 1
+    Y1:DMD-LASER_POZ_IN1_DQ:
+      color: '#bcbd22'
+      label: null
+      offset: 0.0
+      scale: 1.0
+      unit: null
+      width: 1
+  col: 0
+  colspan: 1
+  row: 3
+  rowspan: 1
+  y-range: auto
+t0: 1445719641.5
 time-axis-mode: relative
 time-window:
 - -60.0

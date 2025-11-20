@@ -32,7 +32,7 @@
 #####################################################################
 
 # Turbo pump speed
-record(ai, "$(P)TURBO_PUMP_SPEED") {
+record(ai, "$(P)$(R)TURBO_PUMP_SPEED") {
     field(DESC, "Turbo Pump Speed")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -52,7 +52,7 @@ record(ai, "$(P)TURBO_PUMP_SPEED") {
 }
 
 # Turbo pump current
-record(ai, "$(P)TURBO_PUMP_CURRENT") {
+record(ai, "$(P)$(R)TURBO_PUMP_CURRENT") {
     field(DESC, "Turbo Pump Current")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -68,7 +68,7 @@ record(ai, "$(P)TURBO_PUMP_CURRENT") {
 }
 
 # Turbo pump power
-record(ai, "$(P)TURBO_PUMP_POWER") {
+record(ai, "$(P)$(R)TURBO_PUMP_POWER") {
     field(DESC, "Turbo Pump Power")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -84,7 +84,7 @@ record(ai, "$(P)TURBO_PUMP_POWER") {
 }
 
 # Turbo pump drive temperature
-record(ai, "$(P)TURBO_PUMP_DRIVE_TEMP") {
+record(ai, "$(P)$(R)TURBO_PUMP_DRIVE_TEMP") {
     field(DESC, "Turbo Pump Drive Temp")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -100,7 +100,7 @@ record(ai, "$(P)TURBO_PUMP_DRIVE_TEMP") {
 }
 
 # Turbo pump bearing temperature
-record(ai, "$(P)TURBO_PUMP_BEARING_TEMP") {
+record(ai, "$(P)$(R)TURBO_PUMP_BEARING_TEMP") {
     field(DESC, "Turbo Pump Bearing Temp")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -116,7 +116,7 @@ record(ai, "$(P)TURBO_PUMP_BEARING_TEMP") {
 }
 
 # Turbo pump status
-record(mbbi, "$(P)TURBO_PUMP_STATUS") {
+record(mbbi, "$(P)$(R)TURBO_PUMP_STATUS") {
     field(DESC, "Turbo Pump Status")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -143,7 +143,7 @@ record(mbbi, "$(P)TURBO_PUMP_STATUS") {
 }
 
 # Turbo pump status as text
-record(stringin, "$(P)TURBO_PUMP_STATUS_TEXT") {
+record(stringin, "$(P)$(R)TURBO_PUMP_STATUS_TEXT") {
     field(DESC, "Turbo Pump Status Text")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -151,7 +151,7 @@ record(stringin, "$(P)TURBO_PUMP_STATUS_TEXT") {
 }
 
 # Turbo pump operating hours
-record(ai, "$(P)TURBO_PUMP_HOURS") {
+record(ai, "$(P)$(R)TURBO_PUMP_HOURS") {
     field(DESC, "Turbo Pump Hours")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -167,7 +167,7 @@ record(ai, "$(P)TURBO_PUMP_HOURS") {
 #####################################################################
 
 # Backing pump speed
-record(ai, "$(P)BACKING_PUMP_SPEED") {
+record(ai, "$(P)$(R)BACKING_PUMP_SPEED") {
     field(DESC, "Backing Pump Speed")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -179,7 +179,7 @@ record(ai, "$(P)BACKING_PUMP_SPEED") {
 }
 
 # Backing pump current
-record(ai, "$(P)BACKING_PUMP_CURRENT") {
+record(ai, "$(P)$(R)BACKING_PUMP_CURRENT") {
     field(DESC, "Backing Pump Current")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -195,7 +195,7 @@ record(ai, "$(P)BACKING_PUMP_CURRENT") {
 }
 
 # Backing pump power
-record(ai, "$(P)BACKING_PUMP_POWER") {
+record(ai, "$(P)$(R)BACKING_PUMP_POWER") {
     field(DESC, "Backing Pump Power")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -211,7 +211,7 @@ record(ai, "$(P)BACKING_PUMP_POWER") {
 }
 
 # Backing pump temperature
-record(ai, "$(P)BACKING_PUMP_TEMP") {
+record(ai, "$(P)$(R)BACKING_PUMP_TEMP") {
     field(DESC, "Backing Pump Temperature")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -227,7 +227,7 @@ record(ai, "$(P)BACKING_PUMP_TEMP") {
 }
 
 # Backing pump status
-record(mbbi, "$(P)BACKING_PUMP_STATUS") {
+record(mbbi, "$(P)$(R)BACKING_PUMP_STATUS") {
     field(DESC, "Backing Pump Status")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -254,7 +254,7 @@ record(mbbi, "$(P)BACKING_PUMP_STATUS") {
 }
 
 # Backing pump status as text
-record(stringin, "$(P)BACKING_PUMP_STATUS_TEXT") {
+record(stringin, "$(P)$(R)BACKING_PUMP_STATUS_TEXT") {
     field(DESC, "Backing Pump Status Text")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -262,7 +262,7 @@ record(stringin, "$(P)BACKING_PUMP_STATUS_TEXT") {
 }
 
 # Backing pump operating hours
-record(ai, "$(P)BACKING_PUMP_HOURS") {
+record(ai, "$(P)$(R)BACKING_PUMP_HOURS") {
     field(DESC, "Backing Pump Hours")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -278,7 +278,7 @@ record(ai, "$(P)BACKING_PUMP_HOURS") {
 #####################################################################
 
 # Inlet pressure
-record(ai, "$(P)INLET_PRESSURE") {
+record(ai, "$(P)$(R)INLET_PRESSURE") {
     field(DESC, "Inlet Pressure")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -290,7 +290,7 @@ record(ai, "$(P)INLET_PRESSURE") {
 }
 
 # Foreline pressure
-record(ai, "$(P)FORELINE_PRESSURE") {
+record(ai, "$(P)$(R)FORELINE_PRESSURE") {
     field(DESC, "Foreline Pressure")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -306,7 +306,7 @@ record(ai, "$(P)FORELINE_PRESSURE") {
 }
 
 # Chamber pressure
-record(ai, "$(P)CHAMBER_PRESSURE") {
+record(ai, "$(P)$(R)CHAMBER_PRESSURE") {
     field(DESC, "Chamber Pressure")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -326,7 +326,7 @@ record(ai, "$(P)CHAMBER_PRESSURE") {
 #####################################################################
 
 # Overall system status
-record(mbbi, "$(P)SYSTEM_STATUS") {
+record(mbbi, "$(P)$(R)SYSTEM_STATUS") {
     field(DESC, "System Status")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -353,7 +353,7 @@ record(mbbi, "$(P)SYSTEM_STATUS") {
 }
 
 # Error code
-record(ai, "$(P)ERROR_CODE") {
+record(ai, "$(P)$(R)ERROR_CODE") {
     field(DESC, "Error Code")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -365,7 +365,7 @@ record(ai, "$(P)ERROR_CODE") {
 }
 
 # Warning code
-record(ai, "$(P)WARNING_CODE") {
+record(ai, "$(P)$(R)WARNING_CODE") {
     field(DESC, "Warning Code")
     field(SCAN, "1 second")
     field(DTYP, "Soft Channel")
@@ -377,7 +377,7 @@ record(ai, "$(P)WARNING_CODE") {
 }
 
 # System status text display
-record(stringout, "$(P)SYSTEM_STATUS_TEXT") {
+record(stringout, "$(P)$(R)SYSTEM_STATUS_TEXT") {
     field(DESC, "System Status Text")
     field(DTYP, "Soft Channel")
     field(VAL, "Unknown")

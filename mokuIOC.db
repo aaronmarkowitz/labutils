@@ -1,0 +1,41 @@
+# EPICS Database for Moku related variables
+# This file defines all the EPICS Process Variables (PVs) associated with
+# operating the moku instruments in DMD and nearby experiments
+
+#####################################################################
+# Record templates for different data types - Reference only, not used directly
+#####################################################################
+
+# Template for analog values (with proper units)
+# record(ai, "$(P)$(R)") {
+#     field(DESC, "$(DESC)")
+#     field(SCAN, "I/O Intr")
+#     field(DTYP, "Soft Channel")
+#     field(PREC, "$(PREC=2)")
+#     field(EGU,  "$(EGU)")
+#     field(HIGH, "$(HIGH=0)")
+#     field(HIHI, "$(HIHI=0)")
+#     field(LOW,  "$(LOW=0)")
+#     field(LOLO, "$(LOLO=0)")
+#     field(HSV,  "MINOR")
+#     field(HHSV, "MAJOR")
+#     field(LSV,  "MINOR")
+#     field(LLSV, "MAJOR")
+#     field(HYST, "$(HYST=0)")
+#     field(ADEL, "$(ADEL=0)")
+#     field(MDEL, "$(MDEL=0)")
+#     info(archive, "Monitor, 10 second")
+# }
+
+#####################################################################
+# Turbo Pump Records
+#####################################################################
+
+# Turbo pump speed
+record(bo, "$(P)$(R)DROPPER_ON") {
+	field(DESC, "Piezo dropper is on")
+	field(DTYP, "Soft Channel")
+	field(ZNAM, "OFF")
+	field(ONAM, "ON")
+	field(VAL, "0")	
+}
