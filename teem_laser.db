@@ -1,0 +1,599 @@
+# Teem Photonics MLC-03A-DR1 Laser Controller EPICS Database
+# Prefix: Y1:AUX
+# Author: Claude Sonnet 4.5
+# Date: 2026-01-13
+
+# ==============================================================================
+# CONTROL RECORDS
+# ==============================================================================
+
+# Master laser on/off command
+record(bo, "$(P)$(R)UVD_LASER_ON") {
+    field(DESC, "Laser On/Off Command")
+    field(DTYP, "Soft Channel")
+    field(ZNAM, "OFF")
+    field(ONAM, "ON")
+    field(PINI, "YES")
+    field(VAL, "0")
+    info(archive, "Monitor, 1 second")
+}
+
+# Deadman switch - auto-resets to True (1)
+record(bo, "$(P)$(R)UVD_TURN_OFF") {
+    field(DESC, "Deadman Switch")
+    field(DTYP, "Soft Channel")
+    field(ZNAM, "Keep ON")
+    field(ONAM, "Turn OFF")
+    field(PINI, "YES")
+    field(VAL, "1")
+    info(archive, "Monitor, 1 second")
+}
+
+# Heartbeat timeout in seconds (user configurable)
+record(ao, "$(P)$(R)UVD_HEARTBEAT_TIMEOUT") {
+    field(DESC, "Heartbeat Timeout (s)")
+    field(DTYP, "Soft Channel")
+    field(PREC, "1")
+    field(EGU, "s")
+    field(PINI, "YES")
+    field(VAL, "2.0")
+    field(DRVL, "0.5")
+    field(DRVH, "60.0")
+    field(LOPR, "0")
+    field(HOPR, "60")
+    info(archive, "Monitor, 10 second")
+}
+
+# Last heartbeat timestamp
+record(ai, "$(P)$(R)UVD_LAST_HEARTBEAT") {
+    field(DESC, "Last Heartbeat Time")
+    field(DTYP, "Soft Channel")
+    field(PREC, "3")
+    field(EGU, "s")
+    field(SCAN, "Passive")
+    info(archive, "Monitor, 1 second")
+}
+
+# Emergency stop
+record(bo, "$(P)$(R)UVD_EMERGENCY_STOP") {
+    field(DESC, "Emergency Stop")
+    field(DTYP, "Soft Channel")
+    field(ZNAM, "Normal")
+    field(ONAM, "STOP NOW")
+    field(VAL, "0")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# STATUS RECORDS
+# ==============================================================================
+
+# Laser state machine
+record(mbbi, "$(P)$(R)UVD_LASER_STATE") {
+    field(DESC, "Laser State")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZRVL, "0")
+    field(ZRST, "OFF")
+    field(ONVL, "1")
+    field(ONST, "STARTING")
+    field(TWVL, "2")
+    field(TWST, "ON")
+    field(THVL, "3")
+    field(THST, "STOPPING")
+    field(FRVL, "4")
+    field(FRST, "ERROR")
+    field(PINI, "YES")
+    info(archive, "Monitor, 1 second")
+}
+
+# Laser ready for emission (IREG2:I11)
+record(bi, "$(P)$(R)UVD_READY") {
+    field(DESC, "Laser Ready")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "Not Ready")
+    field(ONAM, "Ready")
+    info(archive, "Monitor, 1 second")
+}
+
+# Laser currently emitting (IREG2:I9)
+record(bi, "$(P)$(R)UVD_EMITTING") {
+    field(DESC, "Laser Emitting")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OFF")
+    field(ONAM, "EMITTING")
+    info(archive, "Monitor, 1 second")
+}
+
+# Temperature regulation OK (IREG2:I11)
+record(bi, "$(P)$(R)UVD_TEMP_OK") {
+    field(DESC, "Temperature OK")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "Not OK")
+    field(ONAM, "OK")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# ERROR REGISTERS (hex values)
+# ==============================================================================
+
+record(longin, "$(P)$(R)UVD_EREG1") {
+    field(DESC, "Error Register 1")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+record(longin, "$(P)$(R)UVD_EREG2") {
+    field(DESC, "Error Register 2")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+record(longin, "$(P)$(R)UVD_EREG3") {
+    field(DESC, "Error Register 3")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# INDIVIDUAL ERROR BITS (EREG1)
+# ==============================================================================
+
+record(bi, "$(P)$(R)UVD_ERR_HEATSINK") {
+    field(DESC, "E1: Heatsink Overtemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_LOW_VOLTAGE") {
+    field(DESC, "E2: Low Voltage")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_INTERLOCK") {
+    field(DESC, "E3: Interlock Open")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_HEAD_OVERTEMP") {
+    field(DESC, "E4: Laser Head Overtemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_DIODE_UNDERTEMP") {
+    field(DESC, "E5: Diode Undertemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_DIODE_OVERTEMP") {
+    field(DESC, "E6: Diode Overtemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_CRYSTAL_UNDERTEMP") {
+    field(DESC, "E7: Crystal Undertemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_CRYSTAL_OVERTEMP") {
+    field(DESC, "E8: Crystal Overtemp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# INDIVIDUAL ERROR BITS (EREG2)
+# ==============================================================================
+
+record(bi, "$(P)$(R)UVD_ERR_TEC_OVERLOAD") {
+    field(DESC, "E9: TEC Overload")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_HEAD_READ") {
+    field(DESC, "E10: Head Read Error")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MINOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_DIODE_BOUNDARY") {
+    field(DESC, "E11: Diode Temp Boundary")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_HIGH_VOLTAGE") {
+    field(DESC, "E12: High Voltage")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_TEC_DIODE_OPEN") {
+    field(DESC, "E13: TEC Diode Open")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_TEC_DIODE_SHORT") {
+    field(DESC, "E14: TEC Diode Short")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_TEC_CRYSTAL_OPEN") {
+    field(DESC, "E15: TEC Crystal Open")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_TEC_CRYSTAL_SHORT") {
+    field(DESC, "E16: TEC Crystal Short")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# INDIVIDUAL ERROR BITS (EREG3)
+# ==============================================================================
+
+record(bi, "$(P)$(R)UVD_ERR_DIODE_OPEN") {
+    field(DESC, "E17: Diode Open Circuit")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_DIODE_SHORT") {
+    field(DESC, "E18: Diode Short Circuit")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_LAMP_FAILURE") {
+    field(DESC, "E19: Lamp Failure")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MINOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_HEAD_ID") {
+    field(DESC, "E20: Wrong Head ID")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_CROSSED_CABLES") {
+    field(DESC, "E21: Crossed Cables")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_CONFIG") {
+    field(DESC, "E22: Config Error")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_COMM") {
+    field(DESC, "E23: Comm Error")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MINOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(bi, "$(P)$(R)UVD_ERR_CRYSTAL_BOUNDARY") {
+    field(DESC, "E24: Crystal Temp Boundary")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(ZNAM, "OK")
+    field(ONAM, "ERROR")
+    field(ZSV, "NO_ALARM")
+    field(OSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# INFO REGISTERS (hex values)
+# ==============================================================================
+
+record(longin, "$(P)$(R)UVD_IREG1") {
+    field(DESC, "Info Register 1")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+record(longin, "$(P)$(R)UVD_IREG2") {
+    field(DESC, "Info Register 2")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+record(longin, "$(P)$(R)UVD_IREG3") {
+    field(DESC, "Info Register 3")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# TEMPERATURE MONITORING
+# ==============================================================================
+
+record(ai, "$(P)$(R)UVD_DIODE_TEMP") {
+    field(DESC, "Diode Temperature")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(PREC, "2")
+    field(EGU, "C")
+    field(HIHI, "60")
+    field(HIGH, "55")
+    field(LOW, "15")
+    field(LOLO, "10")
+    field(HHSV, "MAJOR")
+    field(HSV, "MINOR")
+    field(LSV, "MINOR")
+    field(LLSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(ai, "$(P)$(R)UVD_CRYSTAL_TEMP") {
+    field(DESC, "Crystal Temperature")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(PREC, "2")
+    field(EGU, "C")
+    field(HIHI, "60")
+    field(HIGH, "55")
+    field(LOW, "15")
+    field(LOLO, "10")
+    field(HHSV, "MAJOR")
+    field(HSV, "MINOR")
+    field(LSV, "MINOR")
+    field(LLSV, "MAJOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(ai, "$(P)$(R)UVD_HEATSINK_TEMP") {
+    field(DESC, "Electronics Heatsink Temp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(PREC, "0")
+    field(EGU, "C")
+    field(HIHI, "70")
+    field(HIGH, "60")
+    field(HHSV, "MAJOR")
+    field(HSV, "MINOR")
+    info(archive, "Monitor, 1 second")
+}
+
+record(ai, "$(P)$(R)UVD_LASER_HEATSINK_TEMP") {
+    field(DESC, "Laser Heatsink Temp")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    field(PREC, "0")
+    field(EGU, "C")
+    field(HIHI, "70")
+    field(HIGH, "60")
+    field(HHSV, "MAJOR")
+    field(HSV, "MINOR")
+    info(archive, "Monitor, 1 second")
+}
+
+# ==============================================================================
+# RUNTIME TRACKING
+# ==============================================================================
+
+record(longin, "$(P)$(R)UVD_DIODE_HOURS") {
+    field(DESC, "Diode Supply Hours")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "10 second")
+    field(EGU, "h")
+    info(archive, "Monitor, 60 second")
+}
+
+record(longin, "$(P)$(R)UVD_DIODE_MINUTES") {
+    field(DESC, "Diode Supply Minutes")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "10 second")
+    field(EGU, "min")
+    info(archive, "Monitor, 60 second")
+}
+
+record(longin, "$(P)$(R)UVD_EMISSION_HOURS") {
+    field(DESC, "Laser Emission Hours")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "10 second")
+    field(EGU, "h")
+    info(archive, "Monitor, 60 second")
+}
+
+record(longin, "$(P)$(R)UVD_EMISSION_MINUTES") {
+    field(DESC, "Laser Emission Minutes")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "10 second")
+    field(EGU, "min")
+    info(archive, "Monitor, 60 second")
+}
+
+# ==============================================================================
+# SYSTEM INFO
+# ==============================================================================
+
+record(stringin, "$(P)$(R)UVD_SERIAL_NUMBER") {
+    field(DESC, "Laser Serial Number")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "Passive")
+    field(PINI, "YES")
+    info(archive, "Monitor, 3600 second")
+}
+
+record(stringin, "$(P)$(R)UVD_FW_HEAD") {
+    field(DESC, "Head Firmware Version")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "Passive")
+    field(PINI, "YES")
+    info(archive, "Monitor, 3600 second")
+}
+
+record(stringin, "$(P)$(R)UVD_FW_CONTROLLER") {
+    field(DESC, "Controller FW Version")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "Passive")
+    field(PINI, "YES")
+    info(archive, "Monitor, 3600 second")
+}
+
+# ==============================================================================
+# DIAGNOSTIC/DEBUG RECORDS
+# ==============================================================================
+
+record(longin, "$(P)$(R)UVD_HEARTBEAT_COUNT") {
+    field(DESC, "Heartbeat Counter")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "1 second")
+    info(archive, "Monitor, 10 second")
+}
+
+record(stringin, "$(P)$(R)UVD_LAST_ERROR") {
+    field(DESC, "Last Error Message")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "Passive")
+    info(archive, "Monitor, 1 second")
+}
+
+record(ai, "$(P)$(R)UVD_UPTIME") {
+    field(DESC, "Service Uptime")
+    field(DTYP, "Soft Channel")
+    field(SCAN, "10 second")
+    field(PREC, "1")
+    field(EGU, "s")
+    info(archive, "Monitor, 60 second")
+}

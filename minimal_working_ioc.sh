@@ -24,6 +24,7 @@ softIoc_registerRecordDeviceDriver(pdbbase)
 # Now load the actual databases
 dbLoadRecords("/home/controls/labutils/leybold_turbolab.db", "P=Y1:,R=AUX-,DESC=,EGU=")
 dbLoadRecords("/home/controls/labutils/mokuIOC.db", "P=Y1:,R=AUX-,DESC=,EGU=")
+dbLoadRecords("/home/controls/labutils/teem_laser.db", "P=Y1:,R=AUX-,DESC=,EGU=")
 
 iocInit
 dbl
