@@ -20,10 +20,10 @@ Environment="EPICS_CA_CONN_TMO=10.0"
 
 # Start the service
 # NOTE: Update --device parameter to match your serial device
-ExecStart=/bin/bash -c 'source /home/controls/.conda/envs/controls/bin/activate && python3 /home/controls/labutils/teemController/run_teem_laser.py --device /dev/ttyUSB0 --log-level INFO'
+ExecStart=/home/controls/.conda/envs/controls/bin/python3 /home/controls/labutils/teemController/run_teem_laser.py --device /dev/ttyUSB0 --log-level INFO
 
 # Ensure laser is stopped before service stops
-ExecStopPost=/bin/bash -c 'source /home/controls/.conda/envs/controls/bin/activate && python3 /home/controls/labutils/teemController/teem_laser_control.py off || true'
+ExecStopPost=/home/controls/.conda/envs/controls/bin/python3 /home/controls/labutils/teemController/teem_laser_control.py off || true
 
 # Restart policy
 Restart=always

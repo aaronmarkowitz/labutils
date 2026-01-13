@@ -177,8 +177,13 @@ class TeemController:
             return None
 
         try:
-            # Response format: GSER_hh_hh_hh_hh_hh_hh
-            parts = response.split('_')
+            # Response format: GSER_hh_hh_hh_hh_hh_hh or GSER hh hh hh hh hh hh
+            # Try underscore first, then space
+            if '_' in response:
+                parts = response.split('_')
+            else:
+                parts = response.split()
+
             if len(parts) < 7:
                 self.logger.warning(f"Invalid SER response: {response}")
                 return None
@@ -210,17 +215,22 @@ class TeemController:
             return None
 
         try:
-            # Response format: GMTE_dddd_dddd_dd_dd
-            parts = response.split('_')
+            # Response format: GMTE_dddd_dddd_dd_dd or GMTE dddd dddd dd dd
+            # Try underscore first, then space
+            if '_' in response:
+                parts = response.split('_')
+            else:
+                parts = response.split()
+
             if len(parts) < 5:
                 self.logger.warning(f"Invalid MTE response: {response}")
                 return None
 
             return {
-                'diode_temp': int(parts[1]) * 0.01,      # 0.01°C resolution
-                'crystal_temp': int(parts[2]) * 0.01,    # 0.01°C resolution
-                'heatsink_temp': int(parts[3]),          # 1°C resolution
-                'laser_heatsink_temp': int(parts[4])     # 1°C resolution
+                'diode': int(parts[1]) * 0.01,           # 0.01°C resolution
+                'crystal': int(parts[2]) * 0.01,         # 0.01°C resolution
+                'heatsink': int(parts[3]),               # 1°C resolution
+                'laser_heatsink': int(parts[4])          # 1°C resolution
             }
 
         except (ValueError, IndexError) as e:
@@ -240,8 +250,13 @@ class TeemController:
             return None
 
         try:
-            # Response format: GEMT_ddddd_dd_ddddd_dd
-            parts = response.split('_')
+            # Response format: GEMT_ddddd_dd_ddddd_dd or GEMT ddddd dd ddddd dd
+            # Try underscore first, then space
+            if '_' in response:
+                parts = response.split('_')
+            else:
+                parts = response.split()
+
             if len(parts) < 5:
                 self.logger.warning(f"Invalid EMT response: {response}")
                 return None
@@ -265,8 +280,13 @@ class TeemController:
             return None
 
         try:
-            # Response format: GSEN_dddddddddddddddd
-            parts = response.split('_')
+            # Response format: GSEN_dddddddddddddddd or GSEN dddddddddddddddd
+            # Try underscore first, then space
+            if '_' in response:
+                parts = response.split('_')
+            else:
+                parts = response.split()
+
             if len(parts) < 2:
                 return None
             return parts[1]
@@ -282,8 +302,13 @@ class TeemController:
             return None
 
         try:
-            # Response format: GFVE_ddd_ddd
-            parts = response.split('_')
+            # Response format: GFVE_ddd_ddd or GFVE ddd ddd
+            # Try underscore first, then space
+            if '_' in response:
+                parts = response.split('_')
+            else:
+                parts = response.split()
+
             if len(parts) < 3:
                 return None
             return (parts[1], parts[2])  # (head_fw, controller_fw)
@@ -610,10 +635,10 @@ class TeemLaserService:
         # Get temperatures
         temps = self.controller.get_temperatures()
         if temps:
-            caput(PREFIX + 'UVD_DIODE_TEMP', temps['diode_temp'], wait=False)
-            caput(PREFIX + 'UVD_CRYSTAL_TEMP', temps['crystal_temp'], wait=False)
-            caput(PREFIX + 'UVD_HEATSINK_TEMP', temps['heatsink_temp'], wait=False)
-            caput(PREFIX + 'UVD_LASER_HEATSINK_TEMP', temps['laser_heatsink_temp'], wait=False)
+            caput(PREFIX + 'UVD_DIODE_TEMP', temps['diode'], wait=False)
+            caput(PREFIX + 'UVD_CRYSTAL_TEMP', temps['crystal'], wait=False)
+            caput(PREFIX + 'UVD_HEATSINK_TEMP', temps['heatsink'], wait=False)
+            caput(PREFIX + 'UVD_LASER_HEATSINK_TEMP', temps['laser_heatsink'], wait=False)
 
         # Get emission time (less frequently)
         if int(time.time()) % 10 == 0:  # Every 10 seconds
