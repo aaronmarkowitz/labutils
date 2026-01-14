@@ -115,7 +115,7 @@ class TeemController:
             time.sleep(COMMAND_DELAY - elapsed)
         self.last_command_time = time.time()
 
-    def send_command(self, cmd_key: str, cmd: str, data: str = "") -> Optional[str]:
+    def send_command(self, cmd_key: str, cmd: str, data: str = "", max_retries: int = 2) -> Optional[str]:
         """
         Send command to controller and wait for response
 
@@ -123,47 +123,68 @@ class TeemController:
             cmd_key: 'G' for Get, 'S' for Set
             cmd: 3-character command code
             data: Optional data string
+            max_retries: Number of retry attempts on failure
 
         Returns:
             Response string without prompt, or None on error
         """
         with self.lock:
-            try:
-                self._enforce_command_timing()
+            for attempt in range(max_retries + 1):
+                try:
+                    self._enforce_command_timing()
 
-                # Build command frame: [CMDKey][CMD][DATA][LF][CR]
-                if data:
-                    command = f"{cmd_key}{cmd}_{data}\n\r"
-                else:
-                    command = f"{cmd_key}{cmd}\n\r"
+                    # CRITICAL: Flush buffers before sending to prevent mixed responses
+                    self.serial.reset_input_buffer()
+                    self.serial.reset_output_buffer()
 
-                self.logger.debug(f"TX: {command.strip()}")
+                    # Build command frame: [CMDKey][CMD][DATA][LF][CR]
+                    if data:
+                        command = f"{cmd_key}{cmd}_{data}\n\r"
+                    else:
+                        command = f"{cmd_key}{cmd}\n\r"
 
-                # Send command
-                self.serial.write(command.encode('ascii'))
+                    self.logger.debug(f"TX: {command.strip()}" + (f" (attempt {attempt+1})" if attempt > 0 else ""))
 
-                # Read response until prompt '>'
-                response = ""
-                start_time = time.time()
+                    # Send command
+                    self.serial.write(command.encode('ascii'))
+                    self.serial.flush()  # Ensure data is sent immediately
 
-                while time.time() - start_time < SERIAL_TIMEOUT:
-                    char = self.serial.read(1).decode('ascii', errors='ignore')
-                    if not char:
-                        break
-                    response += char
-                    if char == '>':
-                        break
+                    # Read response until prompt '>'
+                    response = ""
+                    start_time = time.time()
 
-                self.logger.debug(f"RX: {response.strip()}")
+                    while time.time() - start_time < SERIAL_TIMEOUT:
+                        char = self.serial.read(1).decode('ascii', errors='ignore')
+                        if not char:
+                            break
+                        response += char
+                        if char == '>':
+                            break
 
-                # Remove prompt and whitespace
-                response = response.rstrip('>\n\r ')
+                    self.logger.debug(f"RX: {response.strip()}")
 
-                return response if response else None
+                    # Remove prompt and whitespace
+                    response = response.rstrip('>\n\r ')
 
-            except Exception as e:
-                self.logger.error(f"Command failed: {e}")
-                return None
+                    if response:
+                        return response
+                    else:
+                        if attempt < max_retries:
+                            self.logger.warning(f"Empty response, retrying...")
+                            time.sleep(0.1)
+                        else:
+                            self.logger.error(f"No response after {max_retries + 1} attempts")
+                            return None
+
+                except Exception as e:
+                    if attempt < max_retries:
+                        self.logger.warning(f"Command failed (attempt {attempt+1}): {e}, retrying...")
+                        time.sleep(0.1)
+                    else:
+                        self.logger.error(f"Command failed after {max_retries + 1} attempts: {e}")
+                        return None
+
+            return None
 
     def get_status_registers(self) -> Optional[Tuple[int, int, int, int, int, int]]:
         """
@@ -186,7 +207,8 @@ class TeemController:
                 parts = response.split()
 
             if len(parts) < 7:
-                self.logger.warning(f"Invalid SER response: {response}")
+                self.logger.warning(f"Invalid SER response format (expected 7+ parts, got {len(parts)}): {repr(response)}")
+                self.logger.warning(f"Parts: {parts}")
                 return None
 
             # Parse hex values
@@ -201,6 +223,8 @@ class TeemController:
 
         except (ValueError, IndexError) as e:
             self.logger.error(f"Failed to parse SER response: {e}")
+            self.logger.error(f"Raw response: {repr(response)}")
+            self.logger.error(f"Parts: {parts if 'parts' in locals() else 'N/A'}")
             return None
 
     def get_temperatures(self) -> Optional[Dict[str, float]]:
@@ -224,9 +248,11 @@ class TeemController:
                 parts = response.split()
 
             if len(parts) < 5:
-                self.logger.warning(f"Invalid MTE response: {response}")
+                self.logger.warning(f"Invalid MTE response format (expected 5+ parts, got {len(parts)}): {repr(response)}")
+                self.logger.warning(f"Parts: {parts}")
                 return None
 
+            # Parse with detailed error reporting
             return {
                 'diode': int(parts[1]) * 0.01,           # 0.01°C resolution
                 'crystal': int(parts[2]) * 0.01,         # 0.01°C resolution
@@ -236,6 +262,8 @@ class TeemController:
 
         except (ValueError, IndexError) as e:
             self.logger.error(f"Failed to parse MTE response: {e}")
+            self.logger.error(f"Raw response: {repr(response)}")
+            self.logger.error(f"Parts: {parts if 'parts' in locals() else 'N/A'}")
             return None
 
     def get_emission_time(self) -> Optional[Dict[str, int]]:
@@ -492,8 +520,32 @@ class DeadmanSwitch:
                 self.logger.error("EPICS connection may be stale - service needs restart")
                 return False  # Don't trigger shutdown due to EPICS failure
 
+            # Debug logging every 10th check
+            if hasattr(self, 'check_count'):
+                self.check_count += 1
+            else:
+                self.check_count = 0
+
+            if self.check_count % 10 == 0:
+                elapsed = time.time() - last_heartbeat if last_heartbeat else 0
+                self.logger.debug(f"Deadman check: turn_off={turn_off}, heartbeat_age={elapsed:.2f}s, timeout={timeout}s")
+
+            # CRITICAL: Check timeout BEFORE updating heartbeat
+            # This prevents race condition where we shutdown even though heartbeat just arrived
+            if last_heartbeat is not None:
+                elapsed = time.time() - last_heartbeat
+                # If heartbeat is active (turn_off==0), don't trigger timeout
+                # This gives user a grace period to send next heartbeat
+                timeout_exceeded = (elapsed > timeout) and (turn_off != 0)
+
+                if timeout_exceeded:
+                    self.logger.warning(f"Heartbeat timeout exceeded: {elapsed:.1f}s > {timeout}s")
+            else:
+                timeout_exceeded = False
+
             # If user wrote False (0), update heartbeat timestamp
             if turn_off == 0:
+                self.logger.debug(f"Heartbeat detected! Updating timestamp.")
                 current_time = time.time()
                 result = caput(PREFIX + 'UVD_LAST_HEARTBEAT', current_time, wait=False, timeout=1.0)
                 if result is None:
@@ -501,16 +553,6 @@ class DeadmanSwitch:
 
                 self.heartbeat_count += 1
                 caput(PREFIX + 'UVD_HEARTBEAT_COUNT', self.heartbeat_count, wait=False, timeout=1.0)
-
-            # Check if timeout exceeded
-            if last_heartbeat is not None:
-                elapsed = time.time() - last_heartbeat
-                timeout_exceeded = elapsed > timeout
-
-                if timeout_exceeded:
-                    self.logger.warning(f"Heartbeat timeout exceeded: {elapsed:.1f}s > {timeout}s")
-            else:
-                timeout_exceeded = False
 
             # Auto-reset to True (safe state)
             result = caput(PREFIX + 'UVD_TURN_OFF', 1, wait=False, timeout=1.0)
@@ -624,52 +666,59 @@ class TeemLaserService:
 
     def poll_controller(self):
         """Poll controller for status updates"""
-        # Get status registers
-        status = self.controller.get_status_registers()
-        if status:
-            ereg1, ereg2, ereg3, ireg1, ireg2, ireg3 = status
+        try:
+            # Get status registers
+            status = self.controller.get_status_registers()
+            if status:
+                ereg1, ereg2, ereg3, ireg1, ireg2, ireg3 = status
 
-            # Update error registers and check for critical errors
-            self.error_monitor.update_error_registers(ereg1, ereg2, ereg3)
-            has_error, error_codes = self.error_monitor.has_critical_error(ereg1, ereg2, ereg3)
+                # Update error registers and check for critical errors
+                self.error_monitor.update_error_registers(ereg1, ereg2, ereg3)
+                has_error, error_codes = self.error_monitor.has_critical_error(ereg1, ereg2, ereg3)
 
-            if has_error:
-                self.logger.error(f"Critical errors detected: {error_codes}")
-                caput(PREFIX + 'UVD_LAST_ERROR', f"Critical: {','.join(error_codes)}", wait=False)
-                self.state_machine.set_state(LaserState.ERROR)
-                self.controller.stop_laser()
+                if has_error:
+                    self.logger.error(f"Critical errors detected: {error_codes}")
+                    caput(PREFIX + 'UVD_LAST_ERROR', f"Critical: {','.join(error_codes)}", wait=False)
+                    self.state_machine.set_state(LaserState.ERROR)
+                    self.controller.stop_laser()
 
-            # Update info registers
-            caput(PREFIX + 'UVD_IREG1', ireg1, wait=False)
-            caput(PREFIX + 'UVD_IREG2', ireg2, wait=False)
-            caput(PREFIX + 'UVD_IREG3', ireg3, wait=False)
+                # Update info registers
+                caput(PREFIX + 'UVD_IREG1', ireg1, wait=False)
+                caput(PREFIX + 'UVD_IREG2', ireg2, wait=False)
+                caput(PREFIX + 'UVD_IREG3', ireg3, wait=False)
 
-            # Update status bits (from info registers)
-            # IREG2:I11 = Ready for emission
-            ready = (ireg2 >> 2) & 1
-            caput(PREFIX + 'UVD_READY', ready, wait=False)
-            caput(PREFIX + 'UVD_TEMP_OK', ready, wait=False)
+                # Update status bits (from info registers)
+                # IREG2:I11 = Ready for emission
+                ready = (ireg2 >> 2) & 1
+                caput(PREFIX + 'UVD_READY', ready, wait=False)
+                caput(PREFIX + 'UVD_TEMP_OK', ready, wait=False)
 
-            # IREG2:I9 = Laser diode current ON
-            emitting = ireg2 & 1
-            caput(PREFIX + 'UVD_EMITTING', emitting, wait=False)
+                # IREG2:I9 = Laser diode current ON
+                emitting = ireg2 & 1
+                caput(PREFIX + 'UVD_EMITTING', emitting, wait=False)
 
-        # Get temperatures
-        temps = self.controller.get_temperatures()
-        if temps:
-            caput(PREFIX + 'UVD_DIODE_TEMP', temps['diode'], wait=False)
-            caput(PREFIX + 'UVD_CRYSTAL_TEMP', temps['crystal'], wait=False)
-            caput(PREFIX + 'UVD_HEATSINK_TEMP', temps['heatsink'], wait=False)
-            caput(PREFIX + 'UVD_LASER_HEATSINK_TEMP', temps['laser_heatsink'], wait=False)
+            # Get temperatures
+            temps = self.controller.get_temperatures()
+            if temps:
+                caput(PREFIX + 'UVD_DIODE_TEMP', temps['diode'], wait=False)
+                caput(PREFIX + 'UVD_CRYSTAL_TEMP', temps['crystal'], wait=False)
+                caput(PREFIX + 'UVD_HEATSINK_TEMP', temps['heatsink'], wait=False)
+                caput(PREFIX + 'UVD_LASER_HEATSINK_TEMP', temps['laser_heatsink'], wait=False)
 
-        # Get emission time (less frequently)
-        if int(time.time()) % 10 == 0:  # Every 10 seconds
-            emission = self.controller.get_emission_time()
-            if emission:
-                caput(PREFIX + 'UVD_DIODE_HOURS', emission['diode_hours'], wait=False)
-                caput(PREFIX + 'UVD_DIODE_MINUTES', emission['diode_minutes'], wait=False)
-                caput(PREFIX + 'UVD_EMISSION_HOURS', emission['emission_hours'], wait=False)
-                caput(PREFIX + 'UVD_EMISSION_MINUTES', emission['emission_minutes'], wait=False)
+            # Get emission time (less frequently)
+            if int(time.time()) % 10 == 0:  # Every 10 seconds
+                emission = self.controller.get_emission_time()
+                if emission:
+                    caput(PREFIX + 'UVD_DIODE_HOURS', emission['diode_hours'], wait=False)
+                    caput(PREFIX + 'UVD_DIODE_MINUTES', emission['diode_minutes'], wait=False)
+                    caput(PREFIX + 'UVD_EMISSION_HOURS', emission['emission_hours'], wait=False)
+                    caput(PREFIX + 'UVD_EMISSION_MINUTES', emission['emission_minutes'], wait=False)
+
+        except Exception as e:
+            # CRITICAL: Don't let polling errors block the main loop
+            # This ensures deadman switch continues to work even if serial fails
+            self.logger.error(f"Error during controller polling: {e}", exc_info=True)
+            # Continue with loop - deadman check must still run
 
     def process_commands(self):
         """Process commands from IOC"""
