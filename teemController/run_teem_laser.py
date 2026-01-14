@@ -477,10 +477,12 @@ class DeadmanSwitch:
         Returns:
             True if timeout exceeded (should stop laser)
         """
-        # Get current state
-        turn_off = caget(PREFIX + 'UVD_TURN_OFF')
-        last_heartbeat = caget(PREFIX + 'UVD_LAST_HEARTBEAT')
-        timeout = caget(PREFIX + 'UVD_HEARTBEAT_TIMEOUT')
+        # Get current state (force fresh read, no caching)
+        # CRITICAL: use_monitor=False ensures we get the latest value immediately
+        # Without this, cached monitor values cause the deadman switch to fail
+        turn_off = caget(PREFIX + 'UVD_TURN_OFF', use_monitor=False)
+        last_heartbeat = caget(PREFIX + 'UVD_LAST_HEARTBEAT', use_monitor=False)
+        timeout = caget(PREFIX + 'UVD_HEARTBEAT_TIMEOUT', use_monitor=False)
 
         # If user wrote False (0), update heartbeat timestamp
         if turn_off == 0:
