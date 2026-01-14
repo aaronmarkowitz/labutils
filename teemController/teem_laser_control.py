@@ -154,8 +154,9 @@ class LaserControl:
 
         print("\nSending start command...")
 
-        # Send start command
+        # Send start command and initial heartbeat
         caput(PREFIX + 'UVD_LASER_ON', 1, wait=True)
+        caput(PREFIX + 'UVD_TURN_OFF', 0, wait=False)  # Initial heartbeat
 
         # Wait for ready state (up to 10s)
         print("Waiting for laser to be ready...")
@@ -164,6 +165,9 @@ class LaserControl:
                 print("Interrupted during startup")
                 self.turn_off()
                 return False
+
+            # Send heartbeat every iteration to prevent deadman timeout
+            caput(PREFIX + 'UVD_TURN_OFF', 0, wait=False)
 
             state = caget(PREFIX + 'UVD_LASER_STATE')
             ready = caget(PREFIX + 'UVD_READY')
