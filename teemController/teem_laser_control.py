@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/controls/.conda/envs/controls/bin/python3
 """
 Teem Laser Control Script
 Author: Claude Sonnet 4.5
