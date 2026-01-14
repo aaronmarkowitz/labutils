@@ -21,6 +21,7 @@ from threading import Lock
 
 try:
     from epics import caget, caput, PV
+    import epics.ca as ca
 except ImportError:
     print("ERROR: pyepics not installed. Install with: pip install pyepics")
     sys.exit(1)
@@ -477,33 +478,50 @@ class DeadmanSwitch:
         Returns:
             True if timeout exceeded (should stop laser)
         """
-        # Get current state (force fresh read, no caching)
-        # CRITICAL: use_monitor=False ensures we get the latest value immediately
-        # Without this, cached monitor values cause the deadman switch to fail
-        turn_off = caget(PREFIX + 'UVD_TURN_OFF', use_monitor=False)
-        last_heartbeat = caget(PREFIX + 'UVD_LAST_HEARTBEAT', use_monitor=False)
-        timeout = caget(PREFIX + 'UVD_HEARTBEAT_TIMEOUT', use_monitor=False)
+        try:
+            # Get current state (force fresh read, no caching)
+            # CRITICAL: use_monitor=False ensures we get the latest value immediately
+            # Without this, cached monitor values cause the deadman switch to fail
+            turn_off = caget(PREFIX + 'UVD_TURN_OFF', use_monitor=False, timeout=1.0)
+            last_heartbeat = caget(PREFIX + 'UVD_LAST_HEARTBEAT', use_monitor=False, timeout=1.0)
+            timeout = caget(PREFIX + 'UVD_HEARTBEAT_TIMEOUT', use_monitor=False, timeout=1.0)
 
-        # If user wrote False (0), update heartbeat timestamp
-        if turn_off == 0:
-            caput(PREFIX + 'UVD_LAST_HEARTBEAT', time.time(), wait=False)
-            self.heartbeat_count += 1
-            caput(PREFIX + 'UVD_HEARTBEAT_COUNT', self.heartbeat_count, wait=False)
+            # Check if any reads failed (returned None)
+            if turn_off is None or last_heartbeat is None or timeout is None:
+                self.logger.error(f"EPICS read failed! turn_off={turn_off}, last_heartbeat={last_heartbeat}, timeout={timeout}")
+                self.logger.error("EPICS connection may be stale - service needs restart")
+                return False  # Don't trigger shutdown due to EPICS failure
 
-        # Check if timeout exceeded
-        if last_heartbeat is not None:
-            elapsed = time.time() - last_heartbeat
-            timeout_exceeded = elapsed > timeout
+            # If user wrote False (0), update heartbeat timestamp
+            if turn_off == 0:
+                current_time = time.time()
+                result = caput(PREFIX + 'UVD_LAST_HEARTBEAT', current_time, wait=False, timeout=1.0)
+                if result is None:
+                    self.logger.error("Failed to update LAST_HEARTBEAT - EPICS connection issue")
 
-            if timeout_exceeded:
-                self.logger.warning(f"Heartbeat timeout exceeded: {elapsed:.1f}s > {timeout}s")
-        else:
-            timeout_exceeded = False
+                self.heartbeat_count += 1
+                caput(PREFIX + 'UVD_HEARTBEAT_COUNT', self.heartbeat_count, wait=False, timeout=1.0)
 
-        # Auto-reset to True (safe state)
-        caput(PREFIX + 'UVD_TURN_OFF', 1, wait=False)
+            # Check if timeout exceeded
+            if last_heartbeat is not None:
+                elapsed = time.time() - last_heartbeat
+                timeout_exceeded = elapsed > timeout
 
-        return timeout_exceeded
+                if timeout_exceeded:
+                    self.logger.warning(f"Heartbeat timeout exceeded: {elapsed:.1f}s > {timeout}s")
+            else:
+                timeout_exceeded = False
+
+            # Auto-reset to True (safe state)
+            result = caput(PREFIX + 'UVD_TURN_OFF', 1, wait=False, timeout=1.0)
+            if result is None:
+                self.logger.error("Failed to reset TURN_OFF - EPICS connection issue")
+
+            return timeout_exceeded
+
+        except Exception as e:
+            self.logger.error(f"Exception in check_and_reset: {e}", exc_info=True)
+            return False  # Don't trigger shutdown due to exception
 
 
 # ==============================================================================
@@ -752,6 +770,14 @@ class TeemLaserService:
                 # Update diagnostics every 10 seconds
                 if loop_count % 100 == 0:
                     self.update_diagnostics()
+
+                # Clear EPICS cache every hour to prevent stale connections
+                if loop_count % 36000 == 0:  # 36000 loops = 1 hour at 10 Hz
+                    self.logger.info("Clearing EPICS cache to prevent stale connections")
+                    try:
+                        ca.clear_cache()
+                    except Exception as e:
+                        self.logger.warning(f"Failed to clear EPICS cache: {e}")
 
                 loop_count += 1
 
