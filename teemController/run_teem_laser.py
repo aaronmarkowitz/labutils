@@ -324,7 +324,8 @@ class TeemController:
             True if command sent successfully
         """
         response = self.send_command('S', 'SSD', '1')
-        success = response is not None and 'SSSD_1' in response
+        # Response can be "SSSD_1" or "SSSD 1"
+        success = response is not None and ('SSSD_1' in response or 'SSSD 1' in response)
 
         if success:
             self.logger.info("Laser start command sent")
@@ -341,7 +342,8 @@ class TeemController:
             True if command sent successfully
         """
         response = self.send_command('S', 'SSD', '0')
-        success = response is not None and 'SSSD_0' in response
+        # Response can be "SSSD_0" or "SSSD 0"
+        success = response is not None and ('SSSD_0' in response or 'SSSD 0' in response)
 
         if success:
             self.logger.info("Laser stop command sent")
