@@ -166,6 +166,16 @@ class TeemController:
                     # Remove prompt and whitespace
                     response = response.rstrip('>\n\r ')
 
+                    # Filter out controller boot test output
+                    # When controller boots, it outputs test results that contaminate responses
+                    if 'TESTS END' in response or 'Test SUCESSFUL' in response:
+                        self.logger.info("Detected controller boot test output, ignoring...")
+                        if attempt < max_retries:
+                            time.sleep(0.5)  # Wait for test to complete
+                            continue
+                        else:
+                            return None
+
                     if response:
                         return response
                     else:
@@ -464,25 +474,45 @@ class ErrorMonitor:
             value = (ereg3 >> bit_pos) & 1
             caput(PREFIX + pv_name, value, wait=False)
 
-    def has_critical_error(self, ereg1: int, ereg2: int, ereg3: int) -> Tuple[bool, list]:
+    def has_critical_error(self, ereg1: int, ereg2: int, ereg3: int, service_uptime: float = None) -> Tuple[bool, list]:
         """
         Check if any critical errors are present
+
+        Args:
+            ereg1, ereg2, ereg3: Error register values
+            service_uptime: Time since service started (seconds). If < 300s, ignore temp errors.
 
         Returns:
             Tuple of (has_error, list_of_error_codes)
         """
         errors = []
 
+        # Temperature errors to ignore during warm-up (first 5 minutes)
+        WARMUP_ERRORS = {'E5', 'E6', 'E7', 'E8'}  # Diode/crystal under/overtemp
+        WARMUP_PERIOD = 300  # 5 minutes
+
+        in_warmup = service_uptime is not None and service_uptime < WARMUP_PERIOD
+
         for bit_pos, (error_code, pv_name, is_critical) in self.ERROR_BITS['EREG1'].items():
             if is_critical and ((ereg1 >> bit_pos) & 1):
+                # Ignore temperature errors during warm-up period
+                if in_warmup and error_code in WARMUP_ERRORS:
+                    self.logger.info(f"Ignoring {error_code} during warm-up period ({service_uptime:.0f}s < {WARMUP_PERIOD}s)")
+                    continue
                 errors.append(error_code)
 
         for bit_pos, (error_code, pv_name, is_critical) in self.ERROR_BITS['EREG2'].items():
             if is_critical and ((ereg2 >> bit_pos) & 1):
+                if in_warmup and error_code in WARMUP_ERRORS:
+                    self.logger.info(f"Ignoring {error_code} during warm-up period ({service_uptime:.0f}s < {WARMUP_PERIOD}s)")
+                    continue
                 errors.append(error_code)
 
         for bit_pos, (error_code, pv_name, is_critical) in self.ERROR_BITS['EREG3'].items():
             if is_critical and ((ereg3 >> bit_pos) & 1):
+                if in_warmup and error_code in WARMUP_ERRORS:
+                    self.logger.info(f"Ignoring {error_code} during warm-up period ({service_uptime:.0f}s < {WARMUP_PERIOD}s)")
+                    continue
                 errors.append(error_code)
 
         return (len(errors) > 0, errors)
@@ -674,7 +704,8 @@ class TeemLaserService:
 
                 # Update error registers and check for critical errors
                 self.error_monitor.update_error_registers(ereg1, ereg2, ereg3)
-                has_error, error_codes = self.error_monitor.has_critical_error(ereg1, ereg2, ereg3)
+                service_uptime = time.time() - self.start_time
+                has_error, error_codes = self.error_monitor.has_critical_error(ereg1, ereg2, ereg3, service_uptime)
 
                 if has_error:
                     self.logger.error(f"Critical errors detected: {error_codes}")
@@ -767,7 +798,24 @@ class TeemLaserService:
                 self.logger.info("Laser emission stopped")
 
         elif current_state == LaserState.ERROR:
-            # Must manually reset from error state
+            # Auto-recovery: If in ERROR state for >60s and no errors present, auto-reset
+            time_in_error = self.state_machine.time_in_state()
+            if time_in_error > 60:
+                # Check if errors have cleared
+                status = self.controller.get_status_registers()
+                if status:
+                    ereg1, ereg2, ereg3, _, _, _ = status
+                    service_uptime = time.time() - self.start_time
+                    has_error, error_codes = self.error_monitor.has_critical_error(ereg1, ereg2, ereg3, service_uptime)
+
+                    if not has_error:
+                        self.logger.info(f"Errors cleared after {time_in_error:.0f}s, auto-recovering from ERROR state")
+                        self.state_machine.set_state(LaserState.OFF)
+                        caput(PREFIX + 'UVD_LAST_ERROR', "", wait=False)
+                        caput(PREFIX + 'UVD_LASER_ON', 0, wait=False)
+                        return
+
+            # Manual reset from error state
             if laser_on_cmd == 0:
                 self.state_machine.set_state(LaserState.OFF)
                 caput(PREFIX + 'UVD_LAST_ERROR', "", wait=False)
