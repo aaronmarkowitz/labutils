@@ -1,0 +1,5 @@
+amplitude: 1
+edge width: 0.001
+repetition rate: 0.5
+no_pulses: 6
+pulse width: 0.05
