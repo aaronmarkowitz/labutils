@@ -20,10 +20,8 @@ while ip_flag:
     except Exception as e:
         print("An error while trying to connect to the IP address you provided (",ip,f"): {e}")
 
-#Channel number set to 4 for MokuPro. Add functionality to automatically set channel number. 
-channel_no = 4
-
 #Set default parameters
+channel_no = 4 #Default channel number for MokuPro
 amp = 1 #Starting amplitude 
 freq = 1 #Repetition rate of pulse
 pulse_width = 0.1 #Pulse width
@@ -49,12 +47,14 @@ while check_sig:
             pulse_width = loaded_conf['pulse width']
             edge_width = loaded_conf['edge width']
             no_pulses = loaded_conf['no_pulses']
+            channel_no = loaded_conf.get('channel', channel_no)
 
             amp = float(amp)
             freq = float(freq)
             pulse_width = float(pulse_width)
             edge_width = float(edge_width)
             no_pulses = int(no_pulses)
+            channel_no = int(channel_no)
 
         except Exception as e:
             print(f"An error occurred in trying to load conf_pulse.yaml: {e}")
@@ -81,6 +81,7 @@ while check_sig:
 #Store configuration to conf dict
 conf = {
     'amplitude': amp,
+    'channel': channel_no,
     'repetition rate': freq,
     'pulse width': pulse_width,
     'edge width': edge_width,

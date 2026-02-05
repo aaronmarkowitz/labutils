@@ -1,6 +1,7 @@
 amp: 2.25
 amplitude increment: 1.005
 base frequency: 1e3
+channel: 1
 end amp: 4
 no_pulses: 1000
 stop frequency: 3e4
