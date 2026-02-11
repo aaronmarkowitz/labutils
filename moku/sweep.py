@@ -7,18 +7,29 @@ from moku.instruments import WaveformGenerator
 from datetime import datetime
 
 
-#Ask user to input IP address of Moku device
+#Load IP address from config file, or ask user to input it
+ip = None
+try:
+    with open('conf_sweep.yaml', 'r') as file:
+        conf_ip = yaml.safe_load(file)
+    if 'ip_address' in conf_ip and conf_ip['ip_address']:
+        ip = '[' + conf_ip['ip_address'] + ']'
+        print(f"Loaded IP address from conf_sweep.yaml: {conf_ip['ip_address']}")
+except Exception as e:
+    print(f"Could not read IP from conf_sweep.yaml: {e}")
+
 ip_flag = True
 while ip_flag:
-    ip = '[' + input('Please enter the IP address of the moku device you would like to connect to: ') + ']'
-    #ip = '[fe80::fbd7:7058:4eee:6ead]'
-    try: 
+    if ip is None:
+        ip = '[' + input('Please enter the IP address of the moku device you would like to connect to: ') + ']'
+    try:
         # Connect to your Moku by its ip address ip
         # force_connect will overtake an existing connection
         i = WaveformGenerator(ip, force_connect=True)
         ip_flag = False
     except Exception as e:
         print("An error while trying to connect to the IP address you provided (",ip,f"): {e}")
+        ip = None
 
 
 
@@ -91,6 +102,7 @@ conf = {
     'amp': amp,
     'channel': channel_no,
     'end amp': end_amp,
+    'ip_address': ip.strip('[]'),
     'base frequency': start_freq,
     'stop frequency': stop_freq,
     'sweep duration' : T,

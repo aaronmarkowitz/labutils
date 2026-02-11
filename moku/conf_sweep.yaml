@@ -1,8 +1,9 @@
-amp: 2.25
-amplitude increment: 1.005
+amp: 3
+amplitude increment: 1.004
 base frequency: 1e3
 channel: 1
 end amp: 4
+ip_address: "fe80::bf57:9f66:9912:877f%2"
 no_pulses: 1000
 stop frequency: 3e4
 sweep duration: 10
