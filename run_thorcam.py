@@ -9,10 +9,12 @@ from datetime import datetime
 import traceback
 import threading
 from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton, 
-                            QVBoxLayout, QHBoxLayout, QLabel, QSlider, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
+                            QVBoxLayout, QHBoxLayout, QLabel, QSlider,
                             QSpinBox, QDoubleSpinBox, QFileDialog, QGroupBox,
-                            QComboBox, QTabWidget, QMessageBox, QCheckBox)
+                            QComboBox, QTabWidget, QMessageBox, QCheckBox,
+                            QTableWidget, QTableWidgetItem,
+                            QHeaderView, QAbstractItemView)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -30,6 +32,116 @@ except Exception as e:
     print(f"Unexpected error importing Thorlabs SDK: {e}")
     traceback.print_exc()
     sys.exit(1)
+
+class CameraLabel(QLabel):
+    """QLabel subclass that supports click-and-drag repositioning of markup overlays."""
+
+    def __init__(self, cam_id, app, parent=None):
+        super().__init__(parent)
+        self.cam_id = cam_id
+        self.app = app
+        self._drag_idx = -1
+        self.setMouseTracking(True)
+
+    @property
+    def _cam(self):
+        return self.app.cameras[self.cam_id]
+
+    def _scale_info(self):
+        """Return (scale, x_offset, y_offset) mapping image pixels → label pixels."""
+        cam = self._cam
+        iw = getattr(cam, 'image_width', None)
+        ih = getattr(cam, 'image_height', None)
+        if not iw or not ih:
+            return None
+        lw, lh = self.width(), self.height()
+        scale = min(lw / iw, lh / ih)
+        x_off = (lw - iw * scale) / 2
+        y_off = (lh - ih * scale) / 2
+        return scale, x_off, y_off
+
+    def _to_image(self, lx, ly):
+        """Convert label pixel coords to image pixel coords."""
+        si = self._scale_info()
+        if si is None:
+            return None, None
+        scale, x_off, y_off = si
+        return round((lx - x_off) / scale), round((ly - y_off) / scale)
+
+    def _find_overlay(self, lx, ly, threshold=10):
+        """Return index of the closest overlay within *threshold* label-pixels, or -1."""
+        si = self._scale_info()
+        if si is None:
+            return -1
+        scale, x_off, y_off = si
+        best, best_dist = -1, threshold
+        for i, ov in enumerate(self._cam.overlays):
+            if ov['type'] == 'hline':
+                d = abs(ly - (ov['pos'] * scale + y_off))
+            elif ov['type'] == 'vline':
+                d = abs(lx - (ov['pos'] * scale + x_off))
+            elif ov['type'] == 'circle':
+                cx_l = ov['center'][0] * scale + x_off
+                cy_l = ov['center'][1] * scale + y_off
+                r_l  = ov['radius'] * scale
+                d = abs(((lx - cx_l) ** 2 + (ly - cy_l) ** 2) ** 0.5 - r_l)
+            else:
+                continue
+            if d < best_dist:
+                best_dist, best = d, i
+        return best
+
+    def _set_hover_cursor(self, lx, ly):
+        idx = self._find_overlay(lx, ly)
+        if idx < 0:
+            self.setCursor(Qt.CrossCursor)
+            return
+        ov = self._cam.overlays[idx]
+        if ov['type'] == 'hline':
+            self.setCursor(Qt.SizeVerCursor)
+        elif ov['type'] == 'vline':
+            self.setCursor(Qt.SizeHorCursor)
+        else:
+            self.setCursor(Qt.SizeAllCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_idx = self._find_overlay(event.x(), event.y())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_idx >= 0 and (event.buttons() & Qt.LeftButton):
+            ix, iy = self._to_image(event.x(), event.y())
+            if ix is None:
+                return
+            cam = self._cam
+            ov = cam.overlays[self._drag_idx]
+            if ov['type'] == 'hline':
+                ov['pos'] = max(0, iy)
+            elif ov['type'] == 'vline':
+                ov['pos'] = max(0, ix)
+            elif ov['type'] == 'circle':
+                ov['center'] = (max(0, ix), max(0, iy))
+            self.app.sync_overlay_to_table_row(cam, self._drag_idx)
+        else:
+            self._set_hover_cursor(event.x(), event.y())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_idx = -1
+        super().mouseReleaseEvent(event)
+
+
+# BGR color tuples for markup overlays
+MARKUP_COLORS = {
+    "White":   (255, 255, 255),
+    "Red":     (0,   0,   255),
+    "Green":   (0,   255, 0),
+    "Blue":    (255, 0,   0),
+    "Yellow":  (0,   255, 255),
+    "Cyan":    (255, 255, 0),
+    "Magenta": (255, 0,   255),
+}
 
 class CameraInstance:
     """Class to store state and controls for each camera"""
@@ -49,6 +161,10 @@ class CameraInstance:
         self.recorded_frame_count = 0
         self.recording_start_time = 0
         self.last_frame = None
+        self.image_width = None   # set from live frames; used for drag coordinate mapping
+        self.image_height = None
+        # Markup overlays: list of dicts with keys 'type', 'pos'/'center'/'radius', 'color'
+        self.overlays = []
         # Add locks for thread safety
         self.camera_lock = threading.Lock()
 
@@ -283,7 +399,7 @@ class ThorlabsCameraApp(QMainWindow):
             cam_widget.setLayout(cam_layout)
             
             # Camera display
-            cam_instance.image_label = QLabel()
+            cam_instance.image_label = CameraLabel(cam_id, self)
             cam_instance.image_label.setAlignment(Qt.AlignCenter)
             cam_instance.image_label.setMinimumSize(800, 600)
             cam_instance.image_label.setText(f"Connect to {cam_instance.name} to view feed")
@@ -371,10 +487,52 @@ class ThorlabsCameraApp(QMainWindow):
             frames_layout.addWidget(cam_instance.framecount_spinbox)
             recording_layout.addLayout(frames_layout)
             
+            # --- Markup Overlay Controls ---
+            markup_group = QGroupBox("Markup Overlays")
+            markup_layout = QVBoxLayout()
+            markup_group.setLayout(markup_layout)
+
+            # Table: Type | X/CX | Y/CY | Radius | Thickness | Color
+            cam_instance.markup_table = QTableWidget(0, 6)
+            cam_instance.markup_table.setHorizontalHeaderLabels(
+                ["Type", "X / CX", "Y / CY", "Radius", "Thickness", "Color"])
+            cam_instance.markup_table.setMaximumHeight(110)
+            cam_instance.markup_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            cam_instance.markup_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            cam_instance.markup_table.verticalHeader().setVisible(False)
+            cam_instance.markup_table.cellChanged.connect(
+                lambda row, col, c=cam_id: self._on_markup_cell_changed(c, row, col))
+            markup_layout.addWidget(cam_instance.markup_table)
+
+            color_row = QHBoxLayout()
+            color_row.addWidget(QLabel("Color:"))
+            cam_instance.markup_color = QComboBox()
+            for color_name in MARKUP_COLORS:
+                cam_instance.markup_color.addItem(color_name)
+            color_row.addWidget(cam_instance.markup_color)
+            markup_layout.addLayout(color_row)
+
+            markup_btn_row = QHBoxLayout()
+            add_hline_btn = QPushButton("Add H Line")
+            add_hline_btn.clicked.connect(lambda _, c=cam_id: self.add_hline_overlay(c))
+            markup_btn_row.addWidget(add_hline_btn)
+            add_vline_btn = QPushButton("Add V Line")
+            add_vline_btn.clicked.connect(lambda _, c=cam_id: self.add_vline_overlay(c))
+            markup_btn_row.addWidget(add_vline_btn)
+            add_circle_btn = QPushButton("Add Circle")
+            add_circle_btn.clicked.connect(lambda _, c=cam_id: self.add_circle_overlay(c))
+            markup_btn_row.addWidget(add_circle_btn)
+            markup_layout.addLayout(markup_btn_row)
+
+            remove_markup_btn = QPushButton("Remove Selected")
+            remove_markup_btn.clicked.connect(lambda _, c=cam_id: self.remove_selected_overlay(c))
+            markup_layout.addWidget(remove_markup_btn)
+
             # Add control groups to main control layout
             controls_layout.addWidget(exposure_group)
             controls_layout.addWidget(framerate_group)
             controls_layout.addWidget(recording_group)
+            controls_layout.addWidget(markup_group)
             
             # Add controls to camera layout
             cam_layout.addLayout(controls_layout)
@@ -403,6 +561,174 @@ class ThorlabsCameraApp(QMainWindow):
         for cam_id, cam_instance in self.cameras.items():
             cam_instance.debug_label.setVisible(is_visible)
             
+    # ------------------------------------------------------------------ #
+    # Markup overlay helpers                                               #
+    # ------------------------------------------------------------------ #
+
+    def _markup_color(self, cam_instance):
+        return MARKUP_COLORS.get(cam_instance.markup_color.currentText(), (255, 255, 255))
+
+    # --- table helpers ---
+
+    def _make_cell(self, text, editable=True):
+        item = QTableWidgetItem(text)
+        if not editable:
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        return item
+
+    def _add_overlay_table_row(self, cam_instance, ov, color_name):
+        """Append one row to the markup table for the given overlay dict."""
+        table = cam_instance.markup_table
+        table.blockSignals(True)
+        row = table.rowCount()
+        table.insertRow(row)
+        labels = {'hline': 'H Line', 'vline': 'V Line', 'circle': 'Circle'}
+        table.setItem(row, 0, self._make_cell(labels[ov['type']], editable=False))
+        if ov['type'] == 'hline':
+            table.setItem(row, 1, self._make_cell("—", editable=False))
+            table.setItem(row, 2, self._make_cell(str(ov['pos'])))
+            table.setItem(row, 3, self._make_cell("—", editable=False))
+        elif ov['type'] == 'vline':
+            table.setItem(row, 1, self._make_cell(str(ov['pos'])))
+            table.setItem(row, 2, self._make_cell("—", editable=False))
+            table.setItem(row, 3, self._make_cell("—", editable=False))
+        elif ov['type'] == 'circle':
+            table.setItem(row, 1, self._make_cell(str(ov['center'][0])))
+            table.setItem(row, 2, self._make_cell(str(ov['center'][1])))
+            table.setItem(row, 3, self._make_cell(str(ov['radius'])))
+        table.setItem(row, 4, self._make_cell(str(ov.get('thickness', 1))))
+        table.blockSignals(False)
+        # Color column: always-visible QComboBox; not affected by blockSignals
+        color_combo = QComboBox()
+        for cname in MARKUP_COLORS:
+            color_combo.addItem(cname)
+        color_combo.setCurrentText(color_name)
+        color_combo.currentTextChanged.connect(
+            lambda _, ci=cam_instance, cb=color_combo: self._on_color_combo_changed(ci, cb))
+        table.setCellWidget(row, 5, color_combo)
+
+    def _on_color_combo_changed(self, cam_instance, combo):
+        """Update overlay color when the user changes the color combobox."""
+        table = cam_instance.markup_table
+        for row in range(table.rowCount()):
+            if table.cellWidget(row, 5) is combo:
+                if row < len(cam_instance.overlays):
+                    cam_instance.overlays[row]['color'] = MARKUP_COLORS.get(
+                        combo.currentText(), (255, 255, 255))
+                break
+
+    def sync_overlay_to_table_row(self, cam_instance, row):
+        """Push overlay dict values back into the table row (blocks signals to avoid loops)."""
+        table = cam_instance.markup_table
+        ov = cam_instance.overlays[row]
+        table.blockSignals(True)
+        if ov['type'] == 'hline':
+            table.item(row, 2).setText(str(ov['pos']))
+        elif ov['type'] == 'vline':
+            table.item(row, 1).setText(str(ov['pos']))
+        elif ov['type'] == 'circle':
+            table.item(row, 1).setText(str(ov['center'][0]))
+            table.item(row, 2).setText(str(ov['center'][1]))
+            table.item(row, 3).setText(str(ov['radius']))
+        table.item(row, 4).setText(str(ov.get('thickness', 1)))
+        table.blockSignals(False)
+        combo = table.cellWidget(row, 5)
+        if combo:
+            combo.blockSignals(True)
+            color_name = next((n for n, c in MARKUP_COLORS.items() if c == ov['color']), 'White')
+            combo.setCurrentText(color_name)
+            combo.blockSignals(False)
+
+    def _on_markup_cell_changed(self, cam_id, row, col):
+        """Update overlay dict when the user edits a table cell."""
+        cam_instance = self.cameras[cam_id]
+        if row >= len(cam_instance.overlays):
+            return
+        ov = cam_instance.overlays[row]
+        item = cam_instance.markup_table.item(row, col)
+        if item is None:
+            return
+        try:
+            val = int(item.text())
+        except ValueError:
+            self.sync_overlay_to_table_row(cam_instance, row)
+            return
+        if ov['type'] == 'hline' and col == 2:
+            ov['pos'] = max(0, val)
+        elif ov['type'] == 'vline' and col == 1:
+            ov['pos'] = max(0, val)
+        elif ov['type'] == 'circle':
+            cx, cy = ov['center']
+            if col == 1:
+                ov['center'] = (max(0, val), cy)
+            elif col == 2:
+                ov['center'] = (cx, max(0, val))
+            elif col == 3:
+                ov['radius'] = max(1, val)
+        if col == 4:
+            ov['thickness'] = max(1, val)
+        # Re-sync to clamp any out-of-range values the user may have typed
+        self.sync_overlay_to_table_row(cam_instance, row)
+
+    # --- add / remove ---
+
+    def add_hline_overlay(self, cam_id):
+        cam_instance = self.cameras[cam_id]
+        y = (cam_instance.image_height // 2) if cam_instance.image_height else 0
+        color_name = cam_instance.markup_color.currentText()
+        ov = {'type': 'hline', 'pos': y, 'color': self._markup_color(cam_instance), 'thickness': 1}
+        cam_instance.overlays.append(ov)
+        self._add_overlay_table_row(cam_instance, ov, color_name)
+
+    def add_vline_overlay(self, cam_id):
+        cam_instance = self.cameras[cam_id]
+        x = (cam_instance.image_width // 2) if cam_instance.image_width else 0
+        color_name = cam_instance.markup_color.currentText()
+        ov = {'type': 'vline', 'pos': x, 'color': self._markup_color(cam_instance), 'thickness': 1}
+        cam_instance.overlays.append(ov)
+        self._add_overlay_table_row(cam_instance, ov, color_name)
+
+    def add_circle_overlay(self, cam_id):
+        cam_instance = self.cameras[cam_id]
+        cx = (cam_instance.image_width  // 2) if cam_instance.image_width  else 0
+        cy = (cam_instance.image_height // 2) if cam_instance.image_height else 0
+        r  = (min(cam_instance.image_width, cam_instance.image_height) // 8
+              if cam_instance.image_width and cam_instance.image_height else 50)
+        color_name = cam_instance.markup_color.currentText()
+        ov = {'type': 'circle', 'center': (cx, cy), 'radius': r,
+              'color': self._markup_color(cam_instance), 'thickness': 1}
+        cam_instance.overlays.append(ov)
+        self._add_overlay_table_row(cam_instance, ov, color_name)
+
+    def remove_selected_overlay(self, cam_id):
+        cam_instance = self.cameras[cam_id]
+        table = cam_instance.markup_table
+        rows = sorted({idx.row() for idx in table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            table.removeRow(row)
+            cam_instance.overlays.pop(row)
+
+    def apply_overlays(self, cam_instance, image):
+        """Draw markup overlays onto a grayscale image.
+
+        Returns a BGR numpy array with overlays drawn, or None if no overlays
+        are defined (so the caller can skip the conversion cost).
+        """
+        if not cam_instance.overlays:
+            return None
+        out = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        h, w = out.shape[:2]
+        for ov in cam_instance.overlays:
+            color = ov['color']
+            t = ov.get('thickness', 1)
+            if ov['type'] == 'hline':
+                cv2.line(out, (0, ov['pos']), (w - 1, ov['pos']), color, t)
+            elif ov['type'] == 'vline':
+                cv2.line(out, (ov['pos'], 0), (ov['pos'], h - 1), color, t)
+            elif ov['type'] == 'circle':
+                cv2.circle(out, ov['center'], ov['radius'], color, t)
+        return out
+
     def refresh_camera_list(self):
         """Safely refresh the camera list"""
         if self.refreshing_cameras:
@@ -727,27 +1053,37 @@ class ThorlabsCameraApp(QMainWindow):
                 image = np.frombuffer(image_data, dtype=np.uint16).reshape(height, width)
                 image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             
-            # Store the latest frame
+            # Store the latest frame and dimensions (used for drag coordinate mapping)
             cam_instance.last_frame = image
+            cam_instance.image_width = width
+            cam_instance.image_height = height
             
+            # Apply markup overlays (returns BGR image, or None when no overlays)
+            overlay_image = self.apply_overlays(cam_instance, image)
+
             # Record video if needed
             if cam_instance.recording and cam_instance.video_writer:
-                # OpenCV expects BGR format, but our image is grayscale
-                # Convert to BGR by duplicating the channels
-                color_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-                cam_instance.video_writer.write(color_image)
+                # Write overlaid frame (BGR) or plain grayscale-to-BGR
+                if overlay_image is not None:
+                    cam_instance.video_writer.write(overlay_image)
+                else:
+                    cam_instance.video_writer.write(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR))
                 # Update recording duration and frame count
                 duration = time.time() - cam_instance.recording_start_time
                 cam_instance.recorded_frame_count += 1
                 cam_instance.recording_label.setText(f"Recording: {duration:.1f}s, Frames: {cam_instance.recorded_frame_count}")
                 # Auto-stop if limits reached
-                if ((cam_instance.record_duration_limit > 0 and duration >= cam_instance.record_duration_limit) or 
+                if ((cam_instance.record_duration_limit > 0 and duration >= cam_instance.record_duration_limit) or
                     (cam_instance.record_frame_limit > 0 and cam_instance.recorded_frame_count >= cam_instance.record_frame_limit)):
                     self.toggle_recording(cam_id)
                     return
-                
+
             # Display the image
-            q_image = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
+            if overlay_image is not None:
+                display_image = cv2.cvtColor(overlay_image, cv2.COLOR_BGR2RGB)
+                q_image = QImage(display_image.data, width, height, width * 3, QImage.Format_RGB888)
+            else:
+                q_image = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(q_image)
             
             # Scale pixmap to fit the label while maintaining aspect ratio
