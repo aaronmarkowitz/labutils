@@ -531,14 +531,10 @@ class ThorlabsCameraApp(QMainWindow):
         self.camera_selector = QComboBox()
         connection_layout.addWidget(self.camera_selector)
         
-        # Connect buttons for each camera
-        self.connect_cam1_btn = QPushButton("Connect to Camera 1")
-        self.connect_cam1_btn.clicked.connect(lambda: self.connect_camera("cam1"))
-        connection_layout.addWidget(self.connect_cam1_btn)
-        
-        self.connect_cam2_btn = QPushButton("Connect to Camera 2")
-        self.connect_cam2_btn.clicked.connect(lambda: self.connect_camera("cam2"))
-        connection_layout.addWidget(self.connect_cam2_btn)
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.on_connect_btn_clicked)
+        connection_layout.addWidget(self.connect_btn)
+        self.camera_selector.currentIndexChanged.connect(self.update_connect_btn)
         
         # Refresh camera list button
         self.refresh_btn = QPushButton("Refresh Camera List")
@@ -733,6 +729,45 @@ class ThorlabsCameraApp(QMainWindow):
         # Connect debug checkbox to update debug visibility
         self.debug_checkbox.stateChanged.connect(self.toggle_debug_mode)
     
+    def update_connect_btn(self):
+        """Set button text to Connect or Disconnect based on the selected camera's state."""
+        idx = self.camera_selector.currentIndex()
+        if idx < 0:
+            self.connect_btn.setText("Connect")
+            return
+        camera_info = self.camera_selector.itemData(idx)
+        if not camera_info:
+            self.connect_btn.setText("Connect")
+            return
+        device_id = camera_info[1]
+        for cam_instance in self.cameras.values():
+            if cam_instance.camera_id == device_id:
+                self.connect_btn.setText("Disconnect")
+                return
+        self.connect_btn.setText("Connect")
+
+    def on_connect_btn_clicked(self):
+        """Connect or disconnect whichever camera is currently selected in the dropdown."""
+        idx = self.camera_selector.currentIndex()
+        if idx < 0:
+            return
+        camera_info = self.camera_selector.itemData(idx)
+        if not camera_info:
+            return
+        device_id = camera_info[1]
+        # If already connected, disconnect it
+        for cam_id, cam_instance in self.cameras.items():
+            if cam_instance.camera_id == device_id:
+                self.disconnect_camera(cam_id)
+                return
+        # Not connected — assign to the first free slot
+        for cam_id in ("cam1", "cam2"):
+            if not self.cameras[cam_id].camera:
+                self.connect_camera(cam_id)
+                return
+        self.show_error("No Slot Available",
+                        "Both camera slots are already occupied. Disconnect one first.")
+
     def toggle_controls(self, cam_id):
         """Show or hide the controls panel for a camera tab."""
         cam_instance = self.cameras[cam_id]
@@ -1111,14 +1146,7 @@ class ThorlabsCameraApp(QMainWindow):
                 raise RuntimeError(error_msg)
             
             # Update UI
-            if cam_id == "cam1":
-                self.connect_cam1_btn.setText(f"Disconnect {cam_instance.name}")
-                self.connect_cam1_btn.clicked.disconnect()
-                self.connect_cam1_btn.clicked.connect(lambda: self.disconnect_camera("cam1"))
-            else:
-                self.connect_cam2_btn.setText(f"Disconnect {cam_instance.name}")
-                self.connect_cam2_btn.clicked.disconnect()
-                self.connect_cam2_btn.clicked.connect(lambda: self.disconnect_camera("cam2"))
+            self.update_connect_btn()
             
             cam_instance.status_label.setText(f"Connected to {cam_instance.name} ({usb_port})")
             
@@ -1178,14 +1206,7 @@ class ThorlabsCameraApp(QMainWindow):
                 cam_instance.panel_widget.setVisible(False)
 
                 # Update UI
-                if cam_id == "cam1":
-                    self.connect_cam1_btn.setText(f"Connect to {cam_instance.name}")
-                    self.connect_cam1_btn.clicked.disconnect()
-                    self.connect_cam1_btn.clicked.connect(lambda: self.connect_camera("cam1"))
-                else:
-                    self.connect_cam2_btn.setText(f"Connect to {cam_instance.name}")
-                    self.connect_cam2_btn.clicked.disconnect()
-                    self.connect_cam2_btn.clicked.connect(lambda: self.connect_camera("cam2"))
+                self.update_connect_btn()
                 
                 cam_instance.status_label.setText(f"{cam_instance.name} not connected")
                 cam_instance.image_label.setText(f"Connect to {cam_instance.name} to view feed")
