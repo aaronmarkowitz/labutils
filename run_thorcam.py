@@ -178,6 +178,8 @@ class CameraInstance:
         self.panel_widget = None   # QWidget in the splitter; set in init_ui
         self.controls_splitter = None  # QSplitter(Vertical) per camera; set in init_ui
         self._splitter_sizes = None    # saved sizes for toggle restore
+        self.cam_type = None           # 'thorlabs' or 'ids_ueye'; set on connect
+        self.consecutive_frame_errors = 0  # stale-connection detector
         # Add locks for thread safety
         self.camera_lock = threading.Lock()
 
@@ -985,7 +987,20 @@ class ThorlabsCameraApp(QMainWindow):
         finally:
             self.refreshing_cameras = False
             self.refresh_btn.setEnabled(True)
-    
+
+    def _handle_stale_camera(self, cam_id):
+        """Called after too many consecutive frame errors.
+
+        Force-disconnects without crashing on SDK errors (error 1004 etc.),
+        leaving the slot clean so the user can click 'Refresh Camera List'
+        and then Connect — no app restart needed.
+        """
+        cam_instance = self.cameras[cam_id]
+        self.disconnect_camera(cam_id)
+        self.statusBar().showMessage(
+            f"{cam_instance.name}: connection lost — "
+            "click 'Refresh Camera List' then reconnect")
+
     def connect_camera(self, cam_id):
         """Connect to selected camera and assign to the specified camera slot"""
         if self.camera_selector.count() == 0:
@@ -1013,6 +1028,7 @@ class ThorlabsCameraApp(QMainWindow):
         else:
             self.show_error("Unknown camera type", repr(cam_type))
             return
+        cam_instance.cam_type = cam_type
 
         # Check if another camera instance is already using this camera
         for other_id, other_cam in self.cameras.items():
@@ -1195,39 +1211,41 @@ class ThorlabsCameraApp(QMainWindow):
         if cam_instance.recording:
             self.toggle_recording(cam_id)  # Stop recording if active
         
-        try:
-            if cam_instance.camera:
-                print(f"Disconnecting camera {cam_id}")
+        if cam_instance.camera:
+            print(f"Disconnecting camera {cam_id}")
+            # Disarm and dispose each in their own try/except so a stale handle
+            # (error 1004 etc.) cannot prevent the cleanup that follows.
+            try:
                 with cam_instance.camera_lock:
                     cam_instance.camera.disarm()
+            except Exception as e:
+                print(f"Warning: disarm() error for {cam_instance.name} (stale handle?): {e}")
+            try:
+                with cam_instance.camera_lock:
                     cam_instance.camera.dispose()
-                cam_instance.camera = None
-                cam_instance.camera_id = ""
-                cam_instance.panel_widget.setVisible(False)
+            except Exception as e:
+                print(f"Warning: dispose() error for {cam_instance.name} (stale handle?): {e}")
 
-                # Update UI
-                self.update_connect_btn()
-                
-                cam_instance.status_label.setText(f"{cam_instance.name} not connected")
-                cam_instance.image_label.setText(f"Connect to {cam_instance.name} to view feed")
-                cam_instance.image_label.setPixmap(QPixmap())  # Clear the image
-                cam_instance.debug_label.setText("Debug info: Disconnected")
-                
-                msg = f"{cam_instance.name} disconnected"
-                print(msg)
-                self.statusBar().showMessage(msg)
-                
-                # Stop the timer if no cameras are connected
-                if not self.cameras["cam1"].camera and not self.cameras["cam2"].camera:
-                    print("Stopping timer - no cameras connected")
-                    self.timer.stop()
-                    
-        except Exception as e:
-            error_msg = f"Error disconnecting {cam_instance.name}: {str(e)}"
-            print(error_msg)
-            traceback.print_exc()
-            cam_instance.debug_label.setText(f"Disconnect error: {error_msg}")
-            self.show_error(f"Error disconnecting {cam_instance.name}", str(e))
+            # Always clean up local state regardless of SDK errors above
+            cam_instance.camera = None
+            cam_instance.camera_id = ""
+            cam_instance.consecutive_frame_errors = 0
+            cam_instance.panel_widget.setVisible(False)
+
+            self.update_connect_btn()
+
+            cam_instance.status_label.setText(f"{cam_instance.name} not connected")
+            cam_instance.image_label.setText(f"Connect to {cam_instance.name} to view feed")
+            cam_instance.image_label.setPixmap(QPixmap())
+            cam_instance.debug_label.setText("Debug info: Disconnected")
+
+            msg = f"{cam_instance.name} disconnected"
+            print(msg)
+            self.statusBar().showMessage(msg)
+
+            if not self.cameras["cam1"].camera and not self.cameras["cam2"].camera:
+                print("Stopping timer - no cameras connected")
+                self.timer.stop()
     
     def update_frames(self):
         """Update frames from all connected cameras"""
@@ -1330,7 +1348,9 @@ class ThorlabsCameraApp(QMainWindow):
                 cam_instance.fps_label.setText(f"{actual_fps:.1f}")
                 cam_instance.frame_count = 0
                 cam_instance.last_frame_time = time.time()
-                
+
+            cam_instance.consecutive_frame_errors = 0  # successful frame resets counter
+
         except Exception as e:
             error_msg = f"Error acquiring frame for {cam_instance.name}: {str(e)}"
             self.statusBar().showMessage(error_msg)
@@ -1338,6 +1358,11 @@ class ThorlabsCameraApp(QMainWindow):
             if self.debug_checkbox.isChecked():
                 traceback.print_exc()
                 cam_instance.debug_label.setText(f"Frame error: {error_msg}")
+
+            cam_instance.consecutive_frame_errors += 1
+            if cam_instance.consecutive_frame_errors >= 10:
+                print(f"{cam_instance.name}: 10 consecutive frame errors — connection appears stale")
+                self._handle_stale_camera(cam_id)
     
     def exposure_slider_changed(self, cam_id, value):
         """Handle exposure slider change for a specific camera"""
