@@ -182,6 +182,16 @@ class CameraInstance:
         self.consecutive_frame_errors = 0  # stale-connection detector
         # Add locks for thread safety
         self.camera_lock = threading.Lock()
+        self.bit_depth = 8             # cached at connect; display thread reads this without lock
+        self.sensor_width = 0          # cached at connect; fallback when frame lacks dimensions
+        self.sensor_height = 0
+        self.acq_thread = None
+        self.acq_stop_event = threading.Event()
+        self.pending_frame = None      # latest frame from acquisition thread
+        self.frame_lock = threading.Lock()
+        self.new_frame_available = False
+        self.stale_detected = threading.Event()  # set by acq thread; polled by display timer
+        self.video_lock = threading.Lock()       # protects video_writer from concurrent access
 
 class IDSFrame:
     """Duck-type match for Thorlabs frame; holds captured pixel data."""
@@ -298,6 +308,33 @@ class IDSCamera:
     def get_pending_frame_or_null(self):
         frame, self._pending_frame = self._pending_frame, None
         return frame
+
+    def get_pixel_clock_list(self):
+        """Return sorted list of supported pixel clock values (MHz)."""
+        n = ctypes.c_uint()
+        self._ue.is_PixelClock(
+            self._hCam, self._ue.IS_PIXELCLOCK_CMD_GET_NUMBER, n, ctypes.sizeof(n))
+        count = n.value
+        if count == 0:
+            return []
+        arr = (ctypes.c_uint * count)()
+        self._ue.is_PixelClock(
+            self._hCam, self._ue.IS_PIXELCLOCK_CMD_GET_LIST,
+            arr, count * ctypes.sizeof(ctypes.c_uint()))
+        return sorted(set(arr))
+
+    def get_pixel_clock(self):
+        val = ctypes.c_uint()
+        self._ue.is_PixelClock(
+            self._hCam, self._ue.IS_PIXELCLOCK_CMD_GET, val, ctypes.sizeof(val))
+        return val.value
+
+    def set_pixel_clock(self, mhz: int):
+        val = ctypes.c_uint(mhz)
+        ret = self._ue.is_PixelClock(
+            self._hCam, self._ue.IS_PIXELCLOCK_CMD_SET, val, ctypes.sizeof(val))
+        if ret != self._ue.IS_SUCCESS:
+            raise RuntimeError(f"is_PixelClock SET {mhz} MHz failed: {ret}")
 
 
 class ThorlabsCameraApp(QMainWindow):
@@ -627,6 +664,15 @@ class ThorlabsCameraApp(QMainWindow):
             acq_layout.addWidget(QLabel("Actual FPS:"), 2, 0)
             cam_instance.fps_label = QLabel("0")
             acq_layout.addWidget(cam_instance.fps_label, 2, 1)
+
+            cam_instance.pixel_clock_label = QLabel("Clock (MHz):")
+            acq_layout.addWidget(cam_instance.pixel_clock_label, 3, 0)
+            cam_instance.pixel_clock_combo = QComboBox()
+            cam_instance.pixel_clock_combo.currentTextChanged.connect(
+                lambda val, c=cam_id: self.set_pixel_clock(c, val))
+            acq_layout.addWidget(cam_instance.pixel_clock_combo, 3, 1, 1, 3)
+            cam_instance.pixel_clock_label.setVisible(False)
+            cam_instance.pixel_clock_combo.setVisible(False)
 
             # --- Recording Controls ---
             recording_group = QGroupBox("Recording")
@@ -1001,6 +1047,59 @@ class ThorlabsCameraApp(QMainWindow):
             f"{cam_instance.name}: connection lost — "
             "click 'Refresh Camera List' then reconnect")
 
+    def _acquisition_loop(self, cam_id):
+        """Background thread: captures frames at full camera rate, independent of display timer."""
+        cam_instance = self.cameras[cam_id]
+        while not cam_instance.acq_stop_event.is_set():
+            cam = cam_instance.camera
+            if cam is None:
+                break
+            try:
+                cam.issue_software_trigger()
+                frame = cam.get_pending_frame_or_null()
+                if cam_instance.acq_stop_event.is_set():
+                    break
+                if frame is None:
+                    time.sleep(0.001)
+                    continue
+
+                # Store for display
+                with cam_instance.frame_lock:
+                    cam_instance.pending_frame = frame
+                    cam_instance.new_frame_available = True
+
+                # Full-rate recording: write frame here, not in the display timer
+                with cam_instance.video_lock:
+                    if cam_instance.recording and cam_instance.video_writer:
+                        w = frame.image_buffer_size_pixels_horizontal
+                        h = frame.image_buffer_size_pixels_vertical
+                        raw = frame.image_buffer
+                        img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
+                        bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        cam_instance.video_writer.write(bgr)
+                        cam_instance.recorded_frame_count += 1
+                        duration = time.time() - cam_instance.recording_start_time
+                        # Auto-stop check (flags only; label update happens in display timer)
+                        if ((cam_instance.record_duration_limit > 0 and
+                                 duration >= cam_instance.record_duration_limit) or
+                                (cam_instance.record_frame_limit > 0 and
+                                 cam_instance.recorded_frame_count >= cam_instance.record_frame_limit)):
+                            cam_instance.recording = False   # display timer picks this up
+
+                cam_instance.consecutive_frame_errors = 0
+
+            except Exception as e:
+                if cam_instance.acq_stop_event.is_set():
+                    break
+                cam_instance.consecutive_frame_errors += 1
+                print(f"Acquisition error for {cam_instance.name}: {e}")
+                if cam_instance.consecutive_frame_errors >= 10:
+                    cam_instance.stale_detected.set()
+                    break
+                time.sleep(0.05)
+
+        print(f"Acquisition thread {cam_id} exiting")
+
     def connect_camera(self, cam_id):
         """Connect to selected camera and assign to the specified camera slot"""
         if self.camera_selector.count() == 0:
@@ -1160,7 +1259,37 @@ class ThorlabsCameraApp(QMainWindow):
                     except:
                         pass
                 raise RuntimeError(error_msg)
-            
+
+            # Cache sensor info for thread-safe display (no lock needed — not yet started)
+            cam_instance.bit_depth     = cam_instance.camera.bit_depth
+            cam_instance.sensor_width  = cam_instance.camera.sensor_width_pixels
+            cam_instance.sensor_height = cam_instance.camera.sensor_height_pixels
+
+            # --- IDS pixel clock UI ---
+            if cam_type == 'ids_ueye':
+                try:
+                    clocks = cam_instance.camera.get_pixel_clock_list()
+                    current = cam_instance.camera.get_pixel_clock()
+                    cam_instance.pixel_clock_combo.blockSignals(True)
+                    cam_instance.pixel_clock_combo.clear()
+                    for c in clocks:
+                        cam_instance.pixel_clock_combo.addItem(str(c))
+                    cam_instance.pixel_clock_combo.setCurrentText(str(current))
+                    cam_instance.pixel_clock_combo.blockSignals(False)
+                    cam_instance.pixel_clock_label.setVisible(True)
+                    cam_instance.pixel_clock_combo.setVisible(True)
+                except Exception as e:
+                    print(f"Could not read pixel clock info for {cam_instance.name}: {e}")
+
+            # Start per-camera acquisition thread
+            cam_instance.stale_detected.clear()
+            cam_instance.acq_stop_event.clear()
+            cam_instance.new_frame_available = False
+            cam_instance.acq_thread = threading.Thread(
+                target=self._acquisition_loop, args=(cam_id,),
+                daemon=True, name=f"acq-{cam_id}")
+            cam_instance.acq_thread.start()
+
             # Update UI
             self.update_connect_btn()
             
@@ -1213,8 +1342,11 @@ class ThorlabsCameraApp(QMainWindow):
         
         if cam_instance.camera:
             print(f"Disconnecting camera {cam_id}")
+            # Signal the acquisition thread to stop
+            cam_instance.acq_stop_event.set()
             # Disarm and dispose each in their own try/except so a stale handle
             # (error 1004 etc.) cannot prevent the cleanup that follows.
+            # disarm() interrupts any blocking FreezeVideo / get_pending_frame in the thread.
             try:
                 with cam_instance.camera_lock:
                     cam_instance.camera.disarm()
@@ -1226,10 +1358,18 @@ class ThorlabsCameraApp(QMainWindow):
             except Exception as e:
                 print(f"Warning: dispose() error for {cam_instance.name} (stale handle?): {e}")
 
+            # Wait for acquisition thread to exit now that blocking calls have been interrupted
+            if cam_instance.acq_thread and cam_instance.acq_thread.is_alive():
+                cam_instance.acq_thread.join(timeout=2.0)
+            cam_instance.acq_thread = None
+            cam_instance.new_frame_available = False
+
             # Always clean up local state regardless of SDK errors above
             cam_instance.camera = None
             cam_instance.camera_id = ""
             cam_instance.consecutive_frame_errors = 0
+            cam_instance.pixel_clock_label.setVisible(False)
+            cam_instance.pixel_clock_combo.setVisible(False)
             cam_instance.panel_widget.setVisible(False)
 
             self.update_connect_btn()
@@ -1248,121 +1388,86 @@ class ThorlabsCameraApp(QMainWindow):
                 self.timer.stop()
     
     def update_frames(self):
-        """Update frames from all connected cameras"""
         for cam_id, cam_instance in self.cameras.items():
-            if cam_instance.camera:
+            if cam_instance.stale_detected.is_set():
+                cam_instance.stale_detected.clear()
+                self._handle_stale_camera(cam_id)
+            elif cam_instance.camera:
                 self.update_camera_frame(cam_id)
     
     def update_camera_frame(self, cam_id):
-        """Update frame for a specific camera"""
+        """Read the latest frame from the acquisition thread and display it."""
         cam_instance = self.cameras[cam_id]
-        
-        try:
-            # Use lock to ensure thread safety
-            with cam_instance.camera_lock:
-                if not cam_instance.camera:  # Double-check camera is still valid
-                    return
-                
-                # Don't try to get frames from all cameras at exactly the same time
-                # Add a tiny delay between cameras to avoid resource conflicts
-                if cam_id == "cam2":
-                    time.sleep(0.001)  # 1ms stagger between cameras
-                    
-                # Trigger acquisition of the next frame for live display
-                cam_instance.camera.issue_software_trigger()
-                # Get frame from camera
-                frame = cam_instance.camera.get_pending_frame_or_null()
-                
-            if frame is None:
+
+        with cam_instance.frame_lock:
+            if not cam_instance.new_frame_available:
                 return
-            
-            # Determine frame dimensions, fallback to camera sensor size if necessary
-            try:
-                width = frame.image_buffer_size_pixels_horizontal
-                height = frame.image_buffer_size_pixels_vertical
-            except AttributeError:
-                with cam_instance.camera_lock:
-                    width = cam_instance.camera.sensor_width_pixels
-                    height = cam_instance.camera.sensor_height_pixels
-            
-            with cam_instance.camera_lock:
-                bit_depth = cam_instance.camera.bit_depth
-            
-            # Convert frame to numpy array
-            image_data = frame.image_buffer
-            
-            # Create numpy array from image data
-            if bit_depth <= 8:
-                image = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width)
-            else:
-                # For 16-bit images, we need to rescale to 8-bit for display
-                image = np.frombuffer(image_data, dtype=np.uint16).reshape(height, width)
-                image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            
-            # Store the latest frame and dimensions (used for drag coordinate mapping)
-            cam_instance.last_frame = image
-            cam_instance.image_width = width
-            cam_instance.image_height = height
-            
-            # Apply markup overlays (returns BGR image, or None when no overlays)
-            overlay_image = self.apply_overlays(cam_instance, image)
+            frame = cam_instance.pending_frame
+            cam_instance.new_frame_available = False
 
-            # Record video if needed
+        if frame is None:
+            return
+
+        try:
+            width  = frame.image_buffer_size_pixels_horizontal
+            height = frame.image_buffer_size_pixels_vertical
+        except AttributeError:
+            # Thorlabs FrameAndMetadata does not carry per-frame dimensions;
+            # fall back to the sensor dimensions cached at connect time.
+            width  = cam_instance.sensor_width
+            height = cam_instance.sensor_height
+        if not width or not height:
+            return
+
+        bit_depth = cam_instance.bit_depth
+        image_data = frame.image_buffer
+        if bit_depth <= 8:
+            image = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width)
+        else:
+            image = np.frombuffer(image_data, dtype=np.uint16).reshape(height, width)
+            image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+        cam_instance.last_frame  = image
+        cam_instance.image_width  = width
+        cam_instance.image_height = height
+
+        overlay_image = self.apply_overlays(cam_instance, image)
+
+        # Update recording label (frame writes happen in acquisition thread)
+        with cam_instance.video_lock:
             if cam_instance.recording and cam_instance.video_writer:
-                # Write overlaid frame (BGR) or plain grayscale-to-BGR
-                if overlay_image is not None:
-                    cam_instance.video_writer.write(overlay_image)
-                else:
-                    cam_instance.video_writer.write(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR))
-                # Update recording duration and frame count
                 duration = time.time() - cam_instance.recording_start_time
-                cam_instance.recorded_frame_count += 1
-                cam_instance.recording_label.setText(f"Recording: {duration:.1f}s, Frames: {cam_instance.recorded_frame_count}")
-                # Auto-stop if limits reached
-                if ((cam_instance.record_duration_limit > 0 and duration >= cam_instance.record_duration_limit) or
-                    (cam_instance.record_frame_limit > 0 and cam_instance.recorded_frame_count >= cam_instance.record_frame_limit)):
-                    self.toggle_recording(cam_id)
-                    return
+                cam_instance.recording_label.setText(
+                    f"Recording: {duration:.1f}s, "
+                    f"Frames: {cam_instance.recorded_frame_count}")
+            elif not cam_instance.recording and cam_instance.video_writer:
+                # Auto-stop was triggered by acquisition thread
+                cam_instance.video_writer.release()
+                cam_instance.video_writer = None
+                cam_instance.record_button.setText("Start Recording")
+                cam_instance.recording_label.setText("Not Recording")
+                cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
 
-            # Display the image
-            if overlay_image is not None:
-                display_image = cv2.cvtColor(overlay_image, cv2.COLOR_BGR2RGB)
-                q_image = QImage(display_image.data, width, height, width * 3, QImage.Format_RGB888)
-            else:
-                q_image = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(q_image)
-            
-            # Scale pixmap to fit the label while maintaining aspect ratio
-            cam_instance.image_label.setPixmap(pixmap.scaled(
-                cam_instance.image_label.width(), 
-                cam_instance.image_label.height(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            ))
-            
-            # Calculate and show actual FPS
-            cam_instance.frame_count += 1
-            elapsed = time.time() - cam_instance.last_frame_time
-            if elapsed >= 1.0:  # Update FPS display every second
-                actual_fps = cam_instance.frame_count / elapsed
-                cam_instance.fps_label.setText(f"{actual_fps:.1f}")
-                cam_instance.frame_count = 0
-                cam_instance.last_frame_time = time.time()
+        # Display
+        if overlay_image is not None:
+            display_image = cv2.cvtColor(overlay_image, cv2.COLOR_BGR2RGB)
+            q_image = QImage(display_image.data, width, height, width * 3, QImage.Format_RGB888)
+        else:
+            q_image = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
+        pixmap = QPixmap.fromImage(q_image)
+        cam_instance.image_label.setPixmap(pixmap.scaled(
+            cam_instance.image_label.width(),
+            cam_instance.image_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation))
 
-            cam_instance.consecutive_frame_errors = 0  # successful frame resets counter
-
-        except Exception as e:
-            error_msg = f"Error acquiring frame for {cam_instance.name}: {str(e)}"
-            self.statusBar().showMessage(error_msg)
-            print(error_msg)
-            if self.debug_checkbox.isChecked():
-                traceback.print_exc()
-                cam_instance.debug_label.setText(f"Frame error: {error_msg}")
-
-            cam_instance.consecutive_frame_errors += 1
-            if cam_instance.consecutive_frame_errors >= 10:
-                print(f"{cam_instance.name}: 10 consecutive frame errors — connection appears stale")
-                self._handle_stale_camera(cam_id)
+        # FPS counter (display rate)
+        cam_instance.frame_count += 1
+        elapsed = time.time() - cam_instance.last_frame_time
+        if elapsed >= 1.0:
+            cam_instance.fps_label.setText(f"{cam_instance.frame_count / elapsed:.1f}")
+            cam_instance.frame_count = 0
+            cam_instance.last_frame_time = time.time()
     
     def exposure_slider_changed(self, cam_id, value):
         """Handle exposure slider change for a specific camera"""
@@ -1398,6 +1503,16 @@ class ThorlabsCameraApp(QMainWindow):
                     traceback.print_exc()
                     cam_instance.debug_label.setText(f"Exposure error: {error_msg}")
     
+    def set_pixel_clock(self, cam_id, val_str):
+        cam_instance = self.cameras[cam_id]
+        if not cam_instance.camera or cam_instance.cam_type != 'ids_ueye':
+            return
+        try:
+            cam_instance.camera.set_pixel_clock(int(val_str))
+            print(f"{cam_instance.name}: pixel clock → {val_str} MHz")
+        except Exception as e:
+            print(f"Error setting pixel clock for {cam_instance.name}: {e}")
+
     def framerate_slider_changed(self, cam_id, value):
         """Handle framerate slider change for a specific camera"""
         cam_instance = self.cameras[cam_id]
@@ -1458,17 +1573,20 @@ class ThorlabsCameraApp(QMainWindow):
                     if not filename.lower().endswith('.mp4'):
                         filename = filename + '.mp4'
                     
-                    cam_instance.video_writer = cv2.VideoWriter(
-                        filename, fourcc, cam_instance.fps, (width, height)
-                    )
-                    
-                    if cam_instance.video_writer.isOpened():
-                        cam_instance.recording = True
-                        cam_instance.recording_start_time = time.time()
-                        # Initialize recording limits
-                        cam_instance.record_duration_limit = cam_instance.duration_spinbox.value()
-                        cam_instance.record_frame_limit = cam_instance.framecount_spinbox.value()
-                        cam_instance.recorded_frame_count = 0
+                    with cam_instance.video_lock:
+                        cam_instance.video_writer = cv2.VideoWriter(
+                            filename, fourcc, cam_instance.fps, (width, height)
+                        )
+                        if cam_instance.video_writer.isOpened():
+                            cam_instance.recording = True
+                            cam_instance.recording_start_time = time.time()
+                            # Initialize recording limits
+                            cam_instance.record_duration_limit = cam_instance.duration_spinbox.value()
+                            cam_instance.record_frame_limit = cam_instance.framecount_spinbox.value()
+                            cam_instance.recorded_frame_count = 0
+                        else:
+                            cam_instance.video_writer = None
+                    if cam_instance.recording:
                         cam_instance.record_button.setText("Stop Recording")
                         cam_instance.recording_label.setText("Recording started")
                         cam_instance.status_label.setText(f"Recording to {os.path.basename(filename)}")
@@ -1484,14 +1602,14 @@ class ThorlabsCameraApp(QMainWindow):
                 cam_instance.video_writer = None
         else:
             # Stop recording
-            if cam_instance.video_writer:
-                try:
-                    cam_instance.video_writer.release()
-                except Exception as e:
-                    print(f"Error releasing video writer: {e}")
-                cam_instance.video_writer = None
-            
-            cam_instance.recording = False
+            with cam_instance.video_lock:
+                if cam_instance.video_writer:
+                    try:
+                        cam_instance.video_writer.release()
+                    except Exception as e:
+                        print(f"Error releasing video writer: {e}")
+                    cam_instance.video_writer = None
+                cam_instance.recording = False
             cam_instance.record_button.setText("Start Recording")
             cam_instance.recording_label.setText("Not Recording")
             cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
