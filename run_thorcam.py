@@ -192,6 +192,7 @@ class CameraInstance:
         self.new_frame_available = False
         self.stale_detected = threading.Event()  # set by acq thread; polled by display timer
         self.video_lock = threading.Lock()       # protects video_writer from concurrent access
+        self.rotation = 0                          # display rotation in degrees: 0, 90, 180, 270
 
 class IDSFrame:
     """Duck-type match for Thorlabs frame; holds captured pixel data."""
@@ -665,6 +666,11 @@ class ThorlabsCameraApp(QMainWindow):
             cam_instance.fps_label = QLabel("0")
             acq_layout.addWidget(cam_instance.fps_label, 2, 1)
 
+            cam_instance.rotate_btn = QPushButton("Rotate 90°")
+            cam_instance.rotate_btn.clicked.connect(
+                lambda _, c=cam_id: self.rotate_camera(c))
+            acq_layout.addWidget(cam_instance.rotate_btn, 2, 2, 1, 2)
+
             cam_instance.pixel_clock_label = QLabel("Clock (MHz):")
             acq_layout.addWidget(cam_instance.pixel_clock_label, 3, 0)
             cam_instance.pixel_clock_combo = QComboBox()
@@ -1071,10 +1077,19 @@ class ThorlabsCameraApp(QMainWindow):
                 # Full-rate recording: write frame here, not in the display timer
                 with cam_instance.video_lock:
                     if cam_instance.recording and cam_instance.video_writer:
-                        w = frame.image_buffer_size_pixels_horizontal
-                        h = frame.image_buffer_size_pixels_vertical
+                        try:
+                            w = frame.image_buffer_size_pixels_horizontal
+                            h = frame.image_buffer_size_pixels_vertical
+                        except AttributeError:
+                            w = cam_instance.sensor_width
+                            h = cam_instance.sensor_height
                         raw = frame.image_buffer
-                        img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
+                        bit_depth = cam_instance.bit_depth
+                        if bit_depth <= 8:
+                            img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
+                        else:
+                            img = np.frombuffer(raw, dtype=np.uint16).reshape(h, w)
+                            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                         bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                         cam_instance.video_writer.write(bgr)
                         cam_instance.recorded_frame_count += 1
@@ -1427,6 +1442,17 @@ class ThorlabsCameraApp(QMainWindow):
             image = np.frombuffer(image_data, dtype=np.uint16).reshape(height, width)
             image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
+        # Apply display rotation
+        rot = cam_instance.rotation
+        if rot == 90:
+            image = np.rot90(image, k=3)  # rot90 k=3 is clockwise 90°
+        elif rot == 180:
+            image = np.rot90(image, k=2)
+        elif rot == 270:
+            image = np.rot90(image, k=1)  # rot90 k=1 is counter-clockwise 90° = clockwise 270°
+        image = np.ascontiguousarray(image)
+        height, width = image.shape[:2]
+
         cam_instance.last_frame  = image
         cam_instance.image_width  = width
         cam_instance.image_height = height
@@ -1512,6 +1538,13 @@ class ThorlabsCameraApp(QMainWindow):
             print(f"{cam_instance.name}: pixel clock → {val_str} MHz")
         except Exception as e:
             print(f"Error setting pixel clock for {cam_instance.name}: {e}")
+
+    def rotate_camera(self, cam_id):
+        """Cycle display rotation by 90° (0 → 90 → 180 → 270 → 0)."""
+        cam_instance = self.cameras[cam_id]
+        cam_instance.rotation = (cam_instance.rotation + 90) % 360
+        label = f"{cam_instance.rotation}°" if cam_instance.rotation else "0°"
+        cam_instance.rotate_btn.setText(f"Rotate 90° ({label})")
 
     def framerate_slider_changed(self, cam_id, value):
         """Handle framerate slider change for a specific camera"""
