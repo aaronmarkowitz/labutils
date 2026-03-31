@@ -1,0 +1,4 @@
+__pycache__/
+*.log
+snapshots/
+moku/20*_conf_sweep.yaml
