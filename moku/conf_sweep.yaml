@@ -1,8 +1,8 @@
-amp: 3
-amplitude increment: 1.004
-base frequency: 1e3
+amp: 4.6
+amplitude increment: 1.005
+base frequency: 3e3
 channel: 1
-end amp: 4
+end amp: 10
 ip_address: "fe80::bf57:9f66:9912:877f%2"
 no_pulses: 1000
 stop frequency: 3e4

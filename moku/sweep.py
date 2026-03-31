@@ -111,13 +111,19 @@ conf = {
 }
 
 
-#Put date, time etc. in conf file name
+#Put date, time etc. in conf file name and save to Dropbox data directory
+import os
+data_dir = os.path.expanduser(
+    f"~/Dropbox/Microspheres/MAST-QG/worker1/data/{datetime.now().strftime('%y%m%d')}"
+)
+os.makedirs(data_dir, exist_ok=True)
 file_name = datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss") + "_conf_sweep.yaml"
+file_path = os.path.join(data_dir, file_name)
 
 #Save conf as yaml file
-with open(file_name,'w') as file:
+with open(file_path,'w') as file:
     yaml.dump(conf, file)
-print('Configuration has been saved to ' + file_name + '\n')
+print('Configuration has been saved to ' + file_path + '\n')
 
 
 
