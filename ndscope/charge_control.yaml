@@ -29,6 +29,13 @@ plots:
   rowspan: 1
   y-range: auto
 - channels:
+    Y1:AUX-UVD_EMITTING:
+      color: '#9467bd'
+      label: null
+      offset: 0.0
+      scale: 1000.0
+      unit: null
+      width: 1
     Y1:DMD-FIL_INMON:
       color: '#1f77b4'
       label: null
@@ -76,9 +83,9 @@ plots:
   row: 4
   rowspan: 1
   y-range: auto
-t0: 1440954693.0
+t0: 1457841743.3125
 time-axis-mode: relative
 time-window:
-- -69853.52047587946
-- -66253.52047587946
+- -60.0
+- 0.0
 window-title: ndscope
