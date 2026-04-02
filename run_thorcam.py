@@ -1359,25 +1359,40 @@ class ThorlabsCameraApp(QMainWindow):
             print(f"Disconnecting camera {cam_id}")
             # Signal the acquisition thread to stop
             cam_instance.acq_stop_event.set()
-            # Disarm and dispose each in their own try/except so a stale handle
-            # (error 1004 etc.) cannot prevent the cleanup that follows.
             # disarm() interrupts any blocking FreezeVideo / get_pending_frame in the thread.
             try:
                 with cam_instance.camera_lock:
                     cam_instance.camera.disarm()
             except Exception as e:
                 print(f"Warning: disarm() error for {cam_instance.name} (stale handle?): {e}")
-            try:
-                with cam_instance.camera_lock:
-                    cam_instance.camera.dispose()
-            except Exception as e:
-                print(f"Warning: dispose() error for {cam_instance.name} (stale handle?): {e}")
 
-            # Wait for acquisition thread to exit now that blocking calls have been interrupted
+            # Join the acquisition thread BEFORE dispose — the thread may still be
+            # inside an SDK call; disposing the handle while it runs causes a segfault.
             if cam_instance.acq_thread and cam_instance.acq_thread.is_alive():
                 cam_instance.acq_thread.join(timeout=2.0)
             cam_instance.acq_thread = None
             cam_instance.new_frame_available = False
+
+            # Now safe to dispose — the acquisition thread is guaranteed done.
+            dispose_failed = False
+            try:
+                with cam_instance.camera_lock:
+                    cam_instance.camera.dispose()
+            except Exception as e:
+                dispose_failed = True
+                print(f"Warning: dispose() error for {cam_instance.name} (stale handle?): {e}")
+
+            # If Thorlabs dispose failed, the SDK's internal handle table is corrupted.
+            # Reinitialize the SDK so the next open_camera() call doesn't segfault.
+            if dispose_failed and cam_instance.cam_type == 'thorlabs':
+                print(f"Reinitializing Thorlabs SDK after failed dispose")
+                with self.sdk_lock:
+                    try:
+                        self.sdk.dispose()
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                    self.sdk = TLCameraSDK()
 
             # Always clean up local state regardless of SDK errors above
             cam_instance.camera = None
@@ -1674,9 +1689,17 @@ class ThorlabsCameraApp(QMainWindow):
                     print(f"Error releasing video writer for {cam_id}: {e}")
             
             if cam_instance.camera:
+                print(f"Disposing camera {cam_id}")
+                # Stop the acquisition thread before touching the camera handle.
+                cam_instance.acq_stop_event.set()
                 try:
-                    print(f"Disposing camera {cam_id}")
                     cam_instance.camera.disarm()
+                except Exception as e:
+                    print(f"Error disarming camera {cam_id}: {e}")
+                if cam_instance.acq_thread and cam_instance.acq_thread.is_alive():
+                    cam_instance.acq_thread.join(timeout=2.0)
+                cam_instance.acq_thread = None
+                try:
                     cam_instance.camera.dispose()
                 except Exception as e:
                     print(f"Error disposing camera {cam_id}: {e}")
