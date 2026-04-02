@@ -14,7 +14,7 @@ cat > /tmp/auxioc/st.cmd << 'EOF'
 #!/bin/sh
 softIocPVA -D /usr/lib/epics/dbd -d /usr/lib/epics/dbd/softIoc.dbd
 epicsEnvSet("EPICS_CA_SERVER_PORT","5064")
-epicsEnvSet("EPICS_CA_ADDR_LIST", "127.0.0.1")
+epicsEnvSet("EPICS_CA_ADDR_LIST", "127.0.0.1 192.168.1.255")
 epicsEnvSet("EPICS_CA_AUTO_ADDR_LIST", "NO")
 
 # Must load all record types before loading any databases
@@ -25,6 +25,7 @@ softIoc_registerRecordDeviceDriver(pdbbase)
 dbLoadRecords("/home/controls/labutils/epics/leybold_turbolab.db", "P=Y1:,R=AUX-,DESC=,EGU=")
 dbLoadRecords("/home/controls/labutils/epics/mokuIOC.db", "P=Y1:,R=AUX-,DESC=,EGU=")
 dbLoadRecords("/home/controls/labutils/epics/teem_laser.db", "P=Y1:,R=AUX-,DESC=,EGU=")
+dbLoadRecords("/home/controls/labutils/epics/iss_setpoints.db", "P=Y1:,R=AUX-,DESC=,EGU=")
 
 iocInit
 dbl

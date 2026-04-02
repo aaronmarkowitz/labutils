@@ -1,0 +1,65 @@
+# ISS (Intensity Stabilization Servo) Setpoint Records
+# Calibration factors and mW setpoints for X and Z lasers.
+# The calcout records auto-push computed OFFSET (counts) to the CDS filter modules.
+
+# --- X Laser ---
+
+record(ao, "$(P)$(R)ISS_X_CAL") {
+    field(DESC, "X ISS cal factor counts/mW")
+    field(VAL, "1.0")
+    field(PREC, "4")
+    field(EGU, "ct/mW")
+    field(DRVL, "0.001")
+    field(PINI, "YES")
+}
+
+record(ao, "$(P)$(R)ISS_X_SETPOINT_MW") {
+    field(DESC, "X ISS setpoint in mW")
+    field(VAL, "0")
+    field(PREC, "3")
+    field(EGU, "mW")
+    field(PINI, "YES")
+    field(FLNK, "$(P)$(R)ISS_X_CALC")
+}
+
+record(calcout, "$(P)$(R)ISS_X_CALC") {
+    field(DESC, "X ISS mW to counts conversion")
+    field(INPA, "$(P)$(R)ISS_X_SETPOINT_MW NPP")
+    field(INPB, "$(P)$(R)ISS_X_CAL NPP")
+    field(CALC, "-A*B")
+    field(OOPT, "Every Time")
+    field(DOPT, "Use CALC")
+    field(OUT, "Y1:DMD-LASER_CTLX_OFFSET CA")
+    field(PREC, "0")
+}
+
+# --- Z Laser ---
+
+record(ao, "$(P)$(R)ISS_Z_CAL") {
+    field(DESC, "Z ISS cal factor counts/mW")
+    field(VAL, "1.0")
+    field(PREC, "4")
+    field(EGU, "ct/mW")
+    field(DRVL, "0.001")
+    field(PINI, "YES")
+}
+
+record(ao, "$(P)$(R)ISS_Z_SETPOINT_MW") {
+    field(DESC, "Z ISS setpoint in mW")
+    field(VAL, "0")
+    field(PREC, "3")
+    field(EGU, "mW")
+    field(PINI, "YES")
+    field(FLNK, "$(P)$(R)ISS_Z_CALC")
+}
+
+record(calcout, "$(P)$(R)ISS_Z_CALC") {
+    field(DESC, "Z ISS mW to counts conversion")
+    field(INPA, "$(P)$(R)ISS_Z_SETPOINT_MW NPP")
+    field(INPB, "$(P)$(R)ISS_Z_CAL NPP")
+    field(CALC, "-A*B")
+    field(OOPT, "Every Time")
+    field(DOPT, "Use CALC")
+    field(OUT, "Y1:DMD-LASER_CTLZ_OFFSET CA")
+    field(PREC, "0")
+}
