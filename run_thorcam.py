@@ -173,6 +173,9 @@ class CameraInstance:
         self.last_frame = None
         self.image_width = None   # set from live frames; used for drag coordinate mapping
         self.image_height = None
+        # Actual acquisition FPS tracking (in acquisition thread)
+        self.acq_frame_count = 0
+        self.acq_last_time = time.time()
         # Markup overlays: list of dicts with keys 'type', 'pos'/'center'/'radius', 'color'
         self.overlays = []
         self.panel_widget = None   # QWidget in the splitter; set in init_ui
@@ -211,6 +214,7 @@ class IDSCamera:
         from pyueye import ueye
         self._ue = ueye
         self._pending_frame = None
+        self._last_seq_num = -1  # Track frame sequence to avoid counting duplicates
 
         # Open camera by physical device ID
         self._hCam = ctypes.c_uint(device_id | self.IS_USE_DEVICE_ID)
@@ -239,16 +243,30 @@ class IDSCamera:
         if ret != ueye.IS_SUCCESS:
             raise RuntimeError(f"is_SetColorMode(MONO8) failed: {ret}")
 
-        # Allocate one image-memory buffer
-        self._mem_ptr = ueye.c_mem_p()
-        self._mem_id  = ctypes.c_int()
-        ret = ueye.is_AllocImageMem(
-            self._hCam,
-            self.sensor_width_pixels, self.sensor_height_pixels,
-            8, self._mem_ptr, self._mem_id)
-        if ret != ueye.IS_SUCCESS:
-            raise RuntimeError(f"is_AllocImageMem failed: {ret}")
-        ueye.is_SetImageMem(self._hCam, self._mem_ptr, self._mem_id)
+        # Allocate multiple image buffers for queue mode (allows non-blocking polling)
+        self._mem_ptrs = []
+        self._mem_ids = []
+        for i in range(3):  # 3 buffers for smooth queue operation
+            mem_ptr = ueye.c_mem_p()
+            mem_id = ctypes.c_int()
+            ret = ueye.is_AllocImageMem(
+                self._hCam,
+                self.sensor_width_pixels, self.sensor_height_pixels,
+                8, mem_ptr, mem_id)
+            if ret != ueye.IS_SUCCESS:
+                raise RuntimeError(f"is_AllocImageMem failed on buffer {i}: {ret}")
+
+            # Add buffer to image queue
+            ret = ueye.is_AddToSequence(self._hCam, mem_ptr, mem_id)
+            if ret != ueye.IS_SUCCESS:
+                raise RuntimeError(f"is_AddToSequence failed on buffer {i}: {ret}")
+
+            self._mem_ptrs.append(mem_ptr)
+            self._mem_ids.append(mem_id)
+
+        # Keep first buffer reference for compatibility
+        self._mem_ptr = self._mem_ptrs[0]
+        self._mem_id = self._mem_ids[0]
 
         # Cache pitch (bytes per row, may include padding)
         pitch = ctypes.c_int()
@@ -275,17 +293,24 @@ class IDSCamera:
             ctypes.sizeof(exp_ms))
 
     def arm(self, n_buffers=2):
-        ret = self._ue.is_SetExternalTrigger(self._hCam,
-                                              self._ue.IS_SET_TRIGGER_SOFTWARE)
+        # Switch to freerun mode (no external trigger) for continuous capture
+        ret = self._ue.is_SetExternalTrigger(self._hCam, self._ue.IS_SET_TRIGGER_OFF)
         if ret != self._ue.IS_SUCCESS:
-            raise RuntimeError(f"is_SetExternalTrigger(SOFTWARE) failed: {ret}")
+            raise RuntimeError(f"is_SetExternalTrigger(OFF) failed: {ret}")
+
+        # Start live video capture (non-blocking)
+        ret = self._ue.is_CaptureVideo(self._hCam, self._ue.IS_DONT_WAIT)
+        if ret != self._ue.IS_SUCCESS:
+            raise RuntimeError(f"is_CaptureVideo failed: {ret}")
 
     def disarm(self):
         self._ue.is_StopLiveVideo(self._hCam, self._ue.IS_FORCE_VIDEO_STOP)
 
     def dispose(self):
         try:
-            self._ue.is_FreeImageMem(self._hCam, self._mem_ptr, self._mem_id)
+            # Free all allocated image buffers
+            for mem_ptr, mem_id in zip(self._mem_ptrs, self._mem_ids):
+                self._ue.is_FreeImageMem(self._hCam, mem_ptr, mem_id)
         except Exception as e:
             print(f"IDSCamera.dispose FreeImageMem: {e}")
         try:
@@ -294,17 +319,36 @@ class IDSCamera:
             print(f"IDSCamera.dispose ExitCamera: {e}")
 
     def issue_software_trigger(self):
-        """Capture one frame (blocking IS_WAIT) and store as _pending_frame."""
-        ret = self._ue.is_FreezeVideo(self._hCam, self._ue.IS_WAIT)
+        """Poll for next available frame from image queue (non-blocking)."""
+        # Get the most recent frame from the sequence (non-blocking query)
+        nNum = ctypes.c_int()
+        pcMem = self._ue.c_mem_p()
+        pcMemLast = self._ue.c_mem_p()
+
+        ret = self._ue.is_GetActSeqBuf(self._hCam, nNum, pcMem, pcMemLast)
+
         if ret != self._ue.IS_SUCCESS:
-            print(f"IDSCamera: is_FreezeVideo returned {ret}")
+            # No frame available yet - this is normal, just return
             self._pending_frame = None
             return
+
+        # Check if this is a new frame by comparing sequence number
+        seq_num = nNum.value
+        if seq_num == self._last_seq_num:
+            # Same frame as last poll - don't return it again
+            self._pending_frame = None
+            return
+
+        # New frame - update sequence number and copy frame data
+        self._last_seq_num = seq_num
         w, h = self.sensor_width_pixels, self.sensor_height_pixels
-        raw = self._ue.get_data(self._mem_ptr, w, h, 8, self._pitch, copy=True)
+        raw = self._ue.get_data(pcMemLast, w, h, 8, self._pitch, copy=True)
         # Strip row padding if present
         frame_np = raw.reshape(h, self._pitch)[:, :w].copy()
         self._pending_frame = IDSFrame(frame_np.ravel(), w, h)
+
+        # Unlock the buffer so it can be reused
+        self._ue.is_UnlockSeqBuf(self._hCam, nNum, pcMemLast)
 
     def get_pending_frame_or_null(self):
         frame, self._pending_frame = self._pending_frame, None
@@ -354,7 +398,13 @@ class ThorlabsCameraApp(QMainWindow):
         
         # Flag to track if we're currently refreshing cameras
         self.refreshing_cameras = False
-        
+
+        # Per-camera acquisition threads are started when cameras connect
+        # (reverted from unified thread to allow independent pacing)
+
+        # Add dedicated lock for Thorlabs SDK to prevent simultaneous calls
+        self.thorlabs_sdk_lock = threading.Lock()
+
         self.init_ui()
         # Delay SDK initialization to prevent segfaults during startup
         QTimer.singleShot(500, self.init_sdk)
@@ -662,7 +712,7 @@ class ThorlabsCameraApp(QMainWindow):
                 lambda value, c=cam_id: self.framerate_slider_changed(c, value))
             acq_layout.addWidget(cam_instance.framerate_slider, 1, 2, 1, 2)
 
-            acq_layout.addWidget(QLabel("Actual FPS:"), 2, 0)
+            acq_layout.addWidget(QLabel("FPS:"), 2, 0)
             cam_instance.fps_label = QLabel("0")
             acq_layout.addWidget(cam_instance.fps_label, 2, 1)
 
@@ -1054,25 +1104,91 @@ class ThorlabsCameraApp(QMainWindow):
             "click 'Refresh Camera List' then reconnect")
 
     def _acquisition_loop(self, cam_id):
-        """Background thread: captures frames at full camera rate, independent of display timer."""
+        """Background thread: captures frames at full camera rate, independent of display timer.
+
+        Each camera has its own thread, allowing independent pacing and reducing
+        SDK stress compared to tight unified polling loop.
+        """
         cam_instance = self.cameras[cam_id]
+
+        # Debug instrumentation
+        poll_count = 0
+        frame_count = 0
+        null_count = 0
+        slow_polls = 0
+        last_report = time.time()
+
+        print(f"Starting acquisition thread for {cam_id} (type={cam_instance.cam_type})")
+
         while not cam_instance.acq_stop_event.is_set():
             cam = cam_instance.camera
             if cam is None:
                 break
             try:
-                cam.issue_software_trigger()
-                frame = cam.get_pending_frame_or_null()
+                # Trigger/poll based on camera type
+                t0 = time.time()
+                if cam_instance.cam_type == 'ids_ueye':
+                    cam.issue_software_trigger()
+                    poll_count += 1
+                    t1 = time.time()
+                    frame = cam.get_pending_frame_or_null()
+                    t2 = time.time()
+                elif cam_instance.cam_type == 'thorlabs':
+                    # Protect Thorlabs SDK with dedicated lock to prevent corruption from concurrent calls
+                    with self.thorlabs_sdk_lock:
+                        poll_count += 1
+                        t1 = time.time()
+                        frame = cam.get_pending_frame_or_null()
+                        t2 = time.time()
+                else:
+                    poll_count += 1
+                    t1 = time.time()
+                    frame = cam.get_pending_frame_or_null()
+                    t2 = time.time()
+
+                # Track slow polling (indicates SDK blocking)
+                poll_time_ms = (t2 - t1) * 1000
+                if poll_time_ms > 10:
+                    slow_polls += 1
+
                 if cam_instance.acq_stop_event.is_set():
                     break
+
                 if frame is None:
-                    time.sleep(0.001)
+                    null_count += 1
+                    # Sleep on null to prevent CPU burn - throttle both cameras similarly
+                    time.sleep(0.010)  # 10ms throttle for both (~100 polls/s)
                     continue
+
+                frame_count += 1
+
+                # After capturing a frame, add extra sleep to reduce overall system load
+                if cam_instance.cam_type == 'ids_ueye':
+                    time.sleep(0.050)  # 50ms pause after IDS frame (~20 fps max)
+                elif cam_instance.cam_type == 'thorlabs':
+                    time.sleep(0.010)  # 10ms pause after Thorlabs frame
+
+                # Periodic debug report every 5 seconds
+                if time.time() - last_report >= 5.0:
+                    elapsed = time.time() - last_report
+                    poll_rate = poll_count / elapsed
+                    frame_rate = frame_count / elapsed
+                    null_rate = null_count / elapsed
+                    print(f"{cam_id} ({cam_instance.cam_type}): {poll_count} polls ({poll_rate:.0f}/s), "
+                          f"{frame_count} frames ({frame_rate:.1f} fps), {null_count} nulls ({null_rate:.0f}/s), "
+                          f"{slow_polls} slow polls in {elapsed:.1f}s")
+                    poll_count = 0
+                    frame_count = 0
+                    null_count = 0
+                    slow_polls = 0
+                    last_report = time.time()
 
                 # Store for display
                 with cam_instance.frame_lock:
                     cam_instance.pending_frame = frame
                     cam_instance.new_frame_available = True
+                    # Track actual acquisition FPS
+                    cam_instance.acq_frame_count += 1
 
                 # Full-rate recording: write frame here, not in the display timer
                 with cam_instance.video_lock:
@@ -1113,7 +1229,7 @@ class ThorlabsCameraApp(QMainWindow):
                     break
                 time.sleep(0.05)
 
-        print(f"Acquisition thread {cam_id} exiting")
+        print(f"Acquisition thread for {cam_id} exiting")
 
     def connect_camera(self, cam_id):
         """Connect to selected camera and assign to the specified camera slot"""
@@ -1235,9 +1351,16 @@ class ThorlabsCameraApp(QMainWindow):
                 # Configure camera with lock to ensure thread safety
                 with cam_instance.camera_lock:
                     print(f"Configuring camera {device_id}")
-                    cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0  # Continuous acquisition
+                    if cam_type == 'thorlabs':
+                        # Thorlabs: continuous mode
+                        cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
+                        print(f"Thorlabs: frames_per_trigger set to 0 (continuous)")
+                        # Set very short poll timeout to avoid blocking
+                        cam_instance.camera.image_poll_timeout_ms = 0  # Non-blocking poll
+                    else:
+                        # IDS: compatibility no-op
+                        cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
                     cam_instance.camera.exposure_time_us = int(cam_instance.exposure_ms * 1000)  # Convert ms to μs
-                    cam_instance.camera.image_poll_timeout_ms = 1000  # 1 second timeout
             except Exception as e:
                 error_msg = f"Error configuring camera: {str(e)}"
                 print(error_msg)
@@ -1257,10 +1380,17 @@ class ThorlabsCameraApp(QMainWindow):
                 # Start the camera
                 with cam_instance.camera_lock:
                     print(f"Arming camera {device_id}")
-                    cam_instance.camera.arm(2)  # 2 buffers for frame acquisition
+                    # Use many more buffers for Thorlabs to reduce SDK memory pressure
+                    num_buffers = 30 if cam_type == 'thorlabs' else 2
+                    cam_instance.camera.arm(num_buffers)
+                    print(f"Armed with {num_buffers} buffers")
                     time.sleep(0.2)  # Short delay after arming
-                    print(f"Triggering camera {device_id}")
-                    cam_instance.camera.issue_software_trigger()
+                    if cam_type == 'thorlabs':
+                        print(f"Thorlabs: issuing initial trigger for continuous mode")
+                        cam_instance.camera.issue_software_trigger()
+                    else:
+                        print(f"IDS: starting live video (no trigger needed)")
+                        # IDS already started live video in arm()
             except Exception as e:
                 error_msg = f"Error arming camera: {str(e)}"
                 print(error_msg)
@@ -1304,6 +1434,7 @@ class ThorlabsCameraApp(QMainWindow):
                 target=self._acquisition_loop, args=(cam_id,),
                 daemon=True, name=f"acq-{cam_id}")
             cam_instance.acq_thread.start()
+            print(f"Started acquisition thread for {cam_id}")
 
             # Update UI
             self.update_connect_btn()
@@ -1320,10 +1451,13 @@ class ThorlabsCameraApp(QMainWindow):
                 cam_instance.debug_label.setText(f"Camera info error: {str(e)}")
             
             # Start the timer if it's not already running
-            interval = int(1000 / max(self.cameras["cam1"].fps if self.cameras["cam1"].camera else 1, 
-                                     self.cameras["cam2"].fps if self.cameras["cam2"].camera else 1))
-            print(f"Starting timer with interval {interval}ms")
-            self.timer.start(interval)
+            # Use variable display rate based on camera FPS settings
+            interval = int(1000 / max(
+                self.cameras["cam1"].fps if self.cameras["cam1"].camera else 1,
+                self.cameras["cam2"].fps if self.cameras["cam2"].camera else 1))
+            if not self.timer.isActive():
+                print(f"Starting timer with interval {interval}ms")
+                self.timer.start(interval)
             cam_instance.panel_widget.setVisible(True)
 
             msg = f"{cam_instance.name} connected successfully"
@@ -1502,13 +1636,14 @@ class ThorlabsCameraApp(QMainWindow):
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation))
 
-        # FPS counter (display rate)
-        cam_instance.frame_count += 1
-        elapsed = time.time() - cam_instance.last_frame_time
+        # FPS counter (actual acquisition rate from acquisition thread)
+        elapsed = time.time() - cam_instance.acq_last_time
         if elapsed >= 1.0:
-            cam_instance.fps_label.setText(f"{cam_instance.frame_count / elapsed:.1f}")
-            cam_instance.frame_count = 0
-            cam_instance.last_frame_time = time.time()
+            actual_fps = cam_instance.acq_frame_count / elapsed
+            cam_instance.fps_label.setText(f"{actual_fps:.1f}")
+            print(f"Display FPS update for {cam_id}: {actual_fps:.1f} fps ({cam_instance.acq_frame_count} frames in {elapsed:.1f}s)")
+            cam_instance.acq_frame_count = 0
+            cam_instance.acq_last_time = time.time()
     
     def exposure_slider_changed(self, cam_id, value):
         """Handle exposure slider change for a specific camera"""
