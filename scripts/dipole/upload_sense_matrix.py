@@ -4,18 +4,28 @@
 Reads the demodulation matrix W (3xN) produced by dipole_pipeline step 01
 and writes the corresponding elements to Y1:DMD-SENSE_{row}_{col}_GAIN.
 
+Each SENSE element is an rtcds filter module (cdsFiltMuxMatrix). For each
+written element the script also:
+  - Sets TRAMP (ramp time) before writing the gain
+  - Ensures the input switch (SW1, bit 2) and output switch (SW2, bit 10)
+    are on. Because SW1/SW2 writes XOR-toggle bits, the current state is
+    read first and the toggle is only issued if the bit is currently off.
+
 Only the SENSE columns corresponding to channels actually used in the
 diagonalization are written; all other matrix elements are left untouched.
 
 Usage:
-    python3 upload_sense_matrix.py <hdf5_path> [--config <yml>] [--dry-run]
+    python3 upload_sense_matrix.py <hdf5_path> [--config <yml>] [--tramp <sec>] [--dry-run]
 
 Examples:
     # Preview what would be written (no caput calls made):
     python3 upload_sense_matrix.py results.h5 --dry-run
 
-    # Write to live EPICS channels:
+    # Write to live EPICS channels with default 5 s ramp:
     python3 upload_sense_matrix.py results.h5
+
+    # Write with a 10 s ramp:
+    python3 upload_sense_matrix.py results.h5 --tramp 10
 """
 
 import argparse
@@ -27,6 +37,10 @@ from pathlib import Path
 import h5py
 import numpy as np
 import yaml
+
+# Filter module switch bit masks (CDS cdsFilt convention)
+_SW1_INPUT_ON_BIT = 4       # bit 2 of SW1 register: input ON/OFF
+_SW2_OUTPUT_ON_BIT = 1024   # bit 10 of SW2 register: output ON/OFF
 
 
 def load_config(config_path: Path) -> dict:
@@ -54,23 +68,18 @@ def load_hdf5(hdf5_path: Path) -> dict:
 
 
 def build_mapping(hdf5: dict, config: dict) -> list[dict]:
-    """Return list of {epics_channel, value, row_label, col_label, mode, ch_name}."""
+    """Return list of {base, epics_channel, value, row_label, col_label, mode, ch_name}."""
     W = hdf5["W"]  # (3, N)
     channel_names = hdf5["channel_names"]
     prefix = config["prefix"]
     mat = config["matrix_name"]
 
-    # Map mode string -> W row index
     mode_to_row_idx = {"x": 0, "y": 1, "z": 2}
 
-    # Map channel_suffix -> col config entry
-    suffix_to_col = {c["channel_suffix"]: c for c in config["cols"]}
-
-    # Map channel_suffix -> W column index, by matching _IN1 channel names
-    # e.g. "Y1:DMD-LESZ_YAW_IN1" -> suffix "LESZ_YAW"
+    # Map channel_suffix -> W column index via _IN1 channel name stripping
+    # e.g. "Y1:DMD-LESZ_YAW_IN1" -> "LESZ_YAW"
     ch_suffix_to_w_col = {}
     for w_col_idx, ch_name in enumerate(channel_names):
-        # Strip prefix "Y1:DMD-" and suffix "_IN1" to get the filter module name
         stripped = ch_name.replace(f"{prefix}-", "").removesuffix("_IN1")
         ch_suffix_to_w_col[stripped] = w_col_idx
 
@@ -84,12 +93,13 @@ def build_mapping(hdf5: dict, config: dict) -> list[dict]:
             suffix = col_cfg["channel_suffix"]
             sense_col = col_cfg["index"]
             if suffix not in ch_suffix_to_w_col:
-                continue  # this column not present in diagonalization; skip
+                continue  # column not in this diagonalization; skip
             w_col = ch_suffix_to_w_col[suffix]
             value = float(W[w_row, w_col])
-            epics_ch = f"{prefix}-{mat}_{sense_row}_{sense_col}_GAIN"
+            base = f"{prefix}-{mat}_{sense_row}_{sense_col}"
             entries.append({
-                "epics_channel": epics_ch,
+                "base": base,
+                "epics_channel": f"{base}_GAIN",
                 "value": value,
                 "row_label": row_cfg["label"],
                 "col_label": col_cfg["label"],
@@ -100,13 +110,102 @@ def build_mapping(hdf5: dict, config: dict) -> list[dict]:
     return entries
 
 
+def _caget_int(channel: str) -> int | None:
+    """Read a single EPICS channel and return its value as int, or None on error."""
+    result = subprocess.run(
+        ["caget", "-t", channel],
+        capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(float(result.stdout.strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _caput(channel: str, value) -> bool:
+    """Write a single EPICS channel via caput. Returns True on success."""
+    result = subprocess.run(
+        ["caput", channel, str(value)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"  ERROR: caput failed for {channel}: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    return True
+
+
+def read_switch_states(entries: list[dict]) -> dict[str, dict]:
+    """Batch-read SW1R and SW2R for all entry bases. Returns {base: {sw1r, sw2r}}."""
+    channels = []
+    for e in entries:
+        channels.append(f"{e['base']}_SW1R")
+        channels.append(f"{e['base']}_SW2R")
+
+    result = subprocess.run(
+        ["caget", "-t"] + channels,
+        capture_output=True, text=True, timeout=30
+    )
+
+    raw = {}
+    if result.returncode == 0:
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                try:
+                    raw[parts[0]] = int(float(parts[1]))
+                except (ValueError, TypeError):
+                    raw[parts[0]] = None
+
+    states = {}
+    for e in entries:
+        base = e["base"]
+        sw1r = raw.get(f"{base}_SW1R")
+        sw2r = raw.get(f"{base}_SW2R")
+        states[base] = {
+            "sw1r": sw1r,
+            "sw2r": sw2r,
+            "input_on": (sw1r is not None) and bool(sw1r & _SW1_INPUT_ON_BIT),
+            "output_on": (sw2r is not None) and bool(sw2r & _SW2_OUTPUT_ON_BIT),
+        }
+    return states
+
+
+def write_entry(entry: dict, sw_state: dict, tramp: float, dry_run: bool) -> bool:
+    """Set TRAMP, write GAIN, then ensure input and output switches are on.
+
+    Returns True if all operations succeeded (or dry_run=True).
+    """
+    base = entry["base"]
+    ok = True
+
+    if dry_run:
+        return True
+
+    # 1. Set ramp time
+    ok = _caput(f"{base}_TRAMP", tramp) and ok
+
+    # 2. Write gain
+    ok = _caput(f"{base}_GAIN", entry["value"]) and ok
+
+    # 3. Enable input switch if currently off (XOR-toggle, so only write if off)
+    if not sw_state["input_on"]:
+        ok = _caput(f"{base}_SW1", _SW1_INPUT_ON_BIT) and ok
+
+    # 4. Enable output switch if currently off
+    if not sw_state["output_on"]:
+        ok = _caput(f"{base}_SW2", _SW2_OUTPUT_ON_BIT) and ok
+
+    return ok
+
+
 def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> None:
     channel_names = hdf5["channel_names"]
     peaks = hdf5["peak_hz"]
     eratios = hdf5["eigenratio"]
     N = len(channel_names)
 
-    # Determine which cols are NOT being written
     written_col_labels = {e["col_label"] for e in entries}
     all_col_labels = {c["label"] for c in config["cols"]}
     untouched_cols = sorted(all_col_labels - written_col_labels)
@@ -116,8 +215,6 @@ def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> Non
         "y": (peaks["y"], eratios["y"]),
         "z": (peaks["z"], eratios["z"]),
     }
-    # Build per-channel mode assignment: dominant mode is the W row with
-    # the largest absolute value for that channel's column.
     W = hdf5["W"]
     mode_to_row_idx = {"x": 0, "y": 1, "z": 2}
     ch_mode: dict[str, str] = {}
@@ -138,7 +235,7 @@ def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> Non
         print(f"    {ch}  ({mode}-mode, {f0_str}{', ' + er_str if er_str else ''})")
     print()
     if untouched_cols:
-        print(f"  SENSE columns left UNTOUCHED (not in diagonalization):")
+        print("  SENSE columns left UNTOUCHED (not in diagonalization):")
         for lbl in untouched_cols:
             print(f"    {lbl}")
         print()
@@ -160,18 +257,6 @@ def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> Non
     print()
 
 
-def caput(channel: str, value: float) -> bool:
-    """Write a single EPICS channel via caput. Returns True on success."""
-    result = subprocess.run(
-        ["caput", channel, str(value)],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  ERROR: caput failed for {channel}: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    return True
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Upload step 01 W matrix to Y1:DMD SENSE matrix via EPICS caput."
@@ -183,9 +268,16 @@ def main() -> None:
         help="Path to sense_matrix_config.yml (default: same directory as this script)",
     )
     parser.add_argument(
+        "--tramp",
+        type=float,
+        default=5.0,
+        metavar="SEC",
+        help="Ramp time in seconds applied to each element before writing (default: 5)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print planned caput calls without executing them",
+        help="Print planned operations without executing any caput calls",
     )
     args = parser.parse_args()
 
@@ -210,11 +302,31 @@ def main() -> None:
 
     print_sparsity_warning(hdf5, config, entries)
 
-    print(f"  {'DRY RUN — ' if args.dry_run else ''}Writing {len(entries)} SENSE element(s):")
-    print(f"  {'Channel':<40} {'Value':>14}")
-    print(f"  {'-'*40} {'-'*14}")
+    # Read current switch states (batch caget)
+    if not args.dry_run:
+        print("  Reading current switch states ...")
+        sw_states = read_switch_states(entries)
+    else:
+        # In dry-run, populate with None so we show "unknown" for switch status
+        sw_states = {e["base"]: {"input_on": None, "output_on": None} for e in entries}
+
+    prefix = f"DRY RUN — " if args.dry_run else ""
+    print(f"  {prefix}Writing {len(entries)} SENSE element(s)  (TRAMP={args.tramp:.1f} s):")
+    print(f"  {'Channel':<40} {'Value':>14}  {'SW1(in)':>10}  {'SW2(out)':>10}")
+    print(f"  {'-'*40} {'-'*14}  {'-'*10}  {'-'*10}")
     for e in entries:
-        print(f"  {e['epics_channel']:<40} {e['value']:>14.6f}  ({e['row_label']} <- {e['col_label']})")
+        sw = sw_states[e["base"]]
+        if args.dry_run:
+            sw1_str = "dry-run"
+            sw2_str = "dry-run"
+        else:
+            sw1_str = "already on" if sw["input_on"] else "will enable"
+            sw2_str = "already on" if sw["output_on"] else "will enable"
+        print(
+            f"  {e['epics_channel']:<40} {e['value']:>14.6f}"
+            f"  {sw1_str:>10}  {sw2_str:>10}"
+            f"  ({e['row_label']} <- {e['col_label']})"
+        )
     print()
 
     if args.dry_run:
@@ -224,13 +336,15 @@ def main() -> None:
     n_ok = 0
     n_fail = 0
     for e in entries:
-        ok = caput(e["epics_channel"], e["value"])
+        ok = write_entry(e, sw_states[e["base"]], args.tramp, dry_run=False)
+        status = "ok" if ok else "FAILED"
+        print(f"  {e['epics_channel']:<40}  {status}")
         if ok:
             n_ok += 1
         else:
             n_fail += 1
 
-    print(f"  Done: {n_ok} written, {n_fail} failed.")
+    print(f"\n  Done: {n_ok} written, {n_fail} failed.")
     if n_fail:
         sys.exit(1)
 
