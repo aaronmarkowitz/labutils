@@ -113,13 +113,15 @@ def build_mapping(hdf5: dict, config: dict) -> list[dict]:
 def _caget_int(channel: str) -> int | None:
     """Read a single EPICS channel and return its value as int, or None on error."""
     result = subprocess.run(
-        ["caget", "-t", channel],
+        ["caget", channel],
         capture_output=True, text=True, timeout=10
     )
     if result.returncode != 0:
         return None
+    # caget output: "CHANNEL_NAME  value" — take last whitespace-separated token
+    parts = result.stdout.strip().split()
     try:
-        return int(float(result.stdout.strip()))
+        return int(float(parts[-1])) if parts else None
     except (ValueError, TypeError):
         return None
 
@@ -144,7 +146,7 @@ def read_switch_states(entries: list[dict]) -> dict[str, dict]:
         channels.append(f"{e['base']}_SW2R")
 
     result = subprocess.run(
-        ["caget", "-t"] + channels,
+        ["caget"] + channels,
         capture_output=True, text=True, timeout=30
     )
 
