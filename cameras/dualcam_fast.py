@@ -1786,10 +1786,18 @@ class ThorlabsCameraApp(QMainWindow):
         bit_depth = cam_instance.bit_depth
         image_data = frame.image_buffer
         if bit_depth <= 8:
-            image = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width)
+            arr = np.frombuffer(image_data, dtype=np.uint8)
         else:
-            image = np.frombuffer(image_data, dtype=np.uint16).reshape(height, width)
-            image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            arr = np.frombuffer(image_data, dtype=np.uint16)
+        if arr.size != width * height:
+            # Stale frame from before an ROI change (buffer size doesn't match
+            # current dimensions) — discard silently and wait for next frame.
+            return
+        if bit_depth <= 8:
+            image = arr.reshape(height, width)
+        else:
+            image = cv2.normalize(arr.reshape(height, width), None, 0, 255,
+                                  cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
         # Apply display rotation
         rot = cam_instance.rotation
@@ -1980,12 +1988,25 @@ class ThorlabsCameraApp(QMainWindow):
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
                     cam_instance.camera.issue_software_trigger()  # start continuous stream
+                    # Read back what the SDK actually applied — it may silently expand
+                    # the ROI to satisfy hardware alignment / minimum constraints.
+                    applied = cam_instance.camera.roi
+                    w = applied.lower_right_x_pixels - applied.upper_left_x_pixels + 1
+                    h = applied.lower_right_y_pixels - applied.upper_left_y_pixels + 1
+                    x, y = applied.upper_left_x_pixels, applied.upper_left_y_pixels
+                    print(f"Thorlabs ROI applied by SDK: {w}×{h} at ({x},{y})")
+
+            # Flush stale frame before updating dimensions — prevents display thread from
+            # reshaping an old full-frame buffer using the new smaller ROI dimensions.
+            with cam_instance.frame_lock:
+                cam_instance.pending_frame = None
+                cam_instance.new_frame_available = False
 
             cam_instance.roi = (x, y, w, h)
             cam_instance.current_frame_w = w
             cam_instance.current_frame_h = h
 
-            # Reflect clamped values back into UI fields
+            # Reflect actual SDK-applied values back into UI fields
             cam_instance.roi_x.setText(str(x))
             cam_instance.roi_y.setText(str(y))
             cam_instance.roi_w.setText(str(w))
@@ -2028,6 +2049,10 @@ class ThorlabsCameraApp(QMainWindow):
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
                     cam_instance.camera.issue_software_trigger()  # start continuous stream
+
+            with cam_instance.frame_lock:
+                cam_instance.pending_frame = None
+                cam_instance.new_frame_available = False
 
             cam_instance.roi = None
             cam_instance.current_frame_w = cam_instance.sensor_width
