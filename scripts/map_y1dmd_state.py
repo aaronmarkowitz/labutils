@@ -44,7 +44,7 @@ FILTER_MODULES = OrderedDict([
 # Matrix blocks: name -> (rows, cols)
 MATRICES = OrderedDict([
     ("ACTS", (6, 6)),
-    ("SENSE", (4, 6)),
+    ("SENSE", (5, 6)),
 ])
 
 # RampMuxMatrix switches: name -> (outputs, inputs)

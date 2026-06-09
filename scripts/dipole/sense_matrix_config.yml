@@ -1,0 +1,35 @@
+# SENSE matrix layout for Y1:DMD (y1dmd rtcds model)
+#
+# Source of truth: /opt/rtcds/yqg/y1/medm/y1dmd_overview/Y1DMD_SENSE_LABELED.adl
+# Verified against per-element cell files: Y1DMD_SENSE_1_1.adl ... Y1DMD_SENSE_5_6.adl
+#
+# Update this file if the rtcds model is rebuilt with a different SENSE layout.
+# Future extension: derive this mapping dynamically by parsing the .mdl file at
+#   /opt/rtcds/userapps/mastqg/y1dmd.mdl via the mdl_to_adl.py block connectivity
+#   parser in ~/labutils/mdl_to_adl.py.
+#
+# EPICS channel pattern: Y1:DMD-SENSE_{row}_{col}_GAIN  (1-indexed)
+# Physical dimensions: 5 outputs (rows) x 6 inputs (cols)
+# Note: a 7th column slot exists in the ADL files but is a spare unconnected input.
+
+prefix: "Y1:DMD"
+matrix_name: "SENSE"
+
+# Output rows (downstream of the matrix)
+rows:
+  - {index: 1, label: "XERR",  mode: "x"}   # -> PARTICLE_X
+  - {index: 2, label: "YERR",  mode: "y"}   # -> PARTICLE_Y
+  - {index: 3, label: "ZERR",  mode: "z"}   # -> PARTICLE_Z
+  # row 4 (SIG / charge lock-in input) and row 5 (spins / PLL) are not
+  # populated by sensor diagonalization — those rows are left untouched.
+
+# Input columns (upstream of the matrix, from LES filter module outputs)
+# channel_suffix is the part of the EPICS channel name after "Y1:DMD-", e.g.
+# the OUT16 of filter module LESX_PIT feeds column 1.
+cols:
+  - {index: 1, label: "LX_PIT", channel_suffix: "LESX_PIT"}
+  - {index: 2, label: "LX_YAW", channel_suffix: "LESX_YAW"}
+  - {index: 3, label: "LX_SUM", channel_suffix: "LESX_SUM"}
+  - {index: 4, label: "LZ_PIT", channel_suffix: "LESZ_PIT"}
+  - {index: 5, label: "LZ_YAW", channel_suffix: "LESZ_YAW"}
+  - {index: 6, label: "LZ_SUM", channel_suffix: "LESZ_SUM"}
