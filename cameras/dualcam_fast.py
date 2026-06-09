@@ -155,10 +155,13 @@ MARKUP_COLORS = {
 
 # ── Pure helper functions (no SDK / Qt dependency; testable without hardware) ──
 
-def clamp_roi(x, y, w, h, sensor_w, sensor_h, step_x=1, step_y=1):
+def clamp_roi(x, y, w, h, sensor_w, sensor_h, step_x=1, step_y=1,
+              min_lrx=0, min_lry=0):
     """Validate and align ROI parameters to sensor bounds and hardware step constraints.
 
     step_x=4, step_y=2 for IDS DCC1545M-GL; step_x=1, step_y=1 for Thorlabs.
+    min_lrx/min_lry: SDK minimum lower-right pixel coordinate (e.g. Thorlabs CS165MU
+    has lower_right_x_pixels_min=79, lower_right_y_pixels_min=3).
     Returns (x, y, w, h) clamped tuple. Raises ValueError if result is degenerate.
     """
     if int(w) <= 0 or int(h) <= 0:
@@ -169,6 +172,17 @@ def clamp_roi(x, y, w, h, sensor_w, sensor_h, step_x=1, step_y=1):
     h = max(step_y, (int(h) // step_y) * step_y)
     w = min(w, sensor_w - x)
     h = min(h, sensor_h - y)
+    if w <= 0 or h <= 0:
+        raise ValueError("ROI is outside sensor bounds")
+    # Enforce SDK minimum lower-right coordinate (e.g. Thorlabs lower_right_x_pixels_min)
+    if x + w - 1 < min_lrx:
+        w = min_lrx - x + 1
+        w = ((w + step_x - 1) // step_x) * step_x   # round up to step alignment
+        w = min(w, sensor_w - x)
+    if y + h - 1 < min_lry:
+        h = min_lry - y + 1
+        h = ((h + step_y - 1) // step_y) * step_y
+        h = min(h, sensor_h - y)
     if w <= 0 or h <= 0:
         raise ValueError("ROI is outside sensor bounds")
     return x, y, w, h
@@ -246,6 +260,9 @@ class CameraInstance:
         self.roi = None          # (x, y, w, h) or None
         self.current_frame_w = 0  # active capture width; updated on connect and ROI change
         self.current_frame_h = 0  # active capture height; updated on connect and ROI change
+        # Recording timestamps (monotonic); appended per frame; reset on each new recording
+        self._rec_timestamps = []
+        self._rec_filename = ''  # path of current/last recording file
 
 class IDSFrame:
     """Duck-type match for Thorlabs frame; holds captured pixel data."""
@@ -353,10 +370,10 @@ class IDSCamera:
             ctypes.sizeof(exp_ms))
 
     def arm(self, n_buffers=2):
-        # Software-trigger mode: each is_ForceTrigger() captures exactly one frame
-        ret = self._ue.is_SetExternalTrigger(self._hCam, self._ue.IS_SET_TRIGGER_SOFTWARE)
+        # Freerun mode: camera delivers frames continuously; event-driven wait in acquisition loop
+        ret = self._ue.is_SetExternalTrigger(self._hCam, self._ue.IS_SET_TRIGGER_OFF)
         if ret != self._ue.IS_SUCCESS:
-            raise RuntimeError(f"is_SetExternalTrigger(SOFTWARE) failed: {ret}")
+            raise RuntimeError(f"is_SetExternalTrigger(OFF/freerun) failed: {ret}")
 
         # Start live video; each frame gated by is_ForceTrigger
         ret = self._ue.is_CaptureVideo(self._hCam, self._ue.IS_DONT_WAIT)
@@ -515,10 +532,10 @@ class IDSCamera:
             raise RuntimeError(f"is_EnableEvent(FRAME) after AOI failed: {ret}")
         self._event_enabled = True
 
-        # 10. Restart capture in software-trigger mode
-        ret = ue.is_SetExternalTrigger(self._hCam, ue.IS_SET_TRIGGER_SOFTWARE)
+        # 10. Restart capture in freerun mode
+        ret = ue.is_SetExternalTrigger(self._hCam, ue.IS_SET_TRIGGER_OFF)
         if ret != ue.IS_SUCCESS:
-            raise RuntimeError(f"is_SetExternalTrigger(SOFTWARE) after AOI failed: {ret}")
+            raise RuntimeError(f"is_SetExternalTrigger(OFF/freerun) after AOI failed: {ret}")
         ret = ue.is_CaptureVideo(self._hCam, ue.IS_DONT_WAIT)
         if ret != ue.IS_SUCCESS:
             raise RuntimeError(f"is_CaptureVideo after AOI failed: {ret}")
@@ -1304,73 +1321,53 @@ class ThorlabsCameraApp(QMainWindow):
             "click 'Refresh Camera List' then reconnect")
 
     def _acquisition_loop(self, cam_id):
-        """Paced software-triggered acquisition thread.
+        """Full-rate acquisition thread.
 
-        Issues one trigger per interval then blocks waiting for the frame.
-        Eliminates the sleep-after-frame and sleep-on-null bottlenecks from
-        the original polling loop, allowing ≥200 fps with a small ROI.
-        FPS is read once at thread start; use apply_roi or reconnect to change it.
+        Runs at full hardware speed: Thorlabs uses continuous mode (frames_per_trigger=0)
+        with blocking get_pending_frame_or_null(timeout=200ms); IDS uses freerun +
+        is_WaitEvent(IS_SET_EVENT_FRAME, 200ms). No in-loop pacing or triggering.
+        Display timer reads frames at ~30 fps; recording writes every frame with timestamps.
         """
         cam_instance = self.cameras[cam_id]
-        fps = max(1, cam_instance.fps)
-        frame_interval = 1.0 / fps
-        next_trigger = time.monotonic() + frame_interval
         frame_count = 0
         last_report = time.monotonic()
 
-        print(f"Starting paced acquisition for {cam_id} "
-              f"(type={cam_instance.cam_type}, target={fps} fps, interval={frame_interval*1000:.1f}ms)")
+        print(f"Starting full-rate acquisition for {cam_id} (type={cam_instance.cam_type})")
 
         while not cam_instance.acq_stop_event.is_set():
             cam = cam_instance.camera
             if cam is None:
                 break
             try:
-                # --- Pace: sleep until next trigger time ---
-                delay = compute_pacing_delay(next_trigger)
-                if delay > 0:
-                    time.sleep(delay)
-                # Advance by fixed interval (drift-correcting; don't reset to now)
-                next_trigger += frame_interval
-
-                if cam_instance.acq_stop_event.is_set():
-                    break
-
-                # --- Issue trigger ---
-                if cam_instance.cam_type == 'thorlabs':
-                    with self.thorlabs_sdk_lock:
-                        cam.issue_software_trigger()
-                elif cam_instance.cam_type == 'ids_ueye':
-                    cam.issue_trigger()
-
-                # --- Blocking wait for frame (200ms timeout) ---
+                # --- Blocking wait for next frame ---
                 frame = None
                 if cam_instance.cam_type == 'thorlabs':
-                    # get_pending_frame_or_null respects image_poll_timeout_ms=200
+                    # image_poll_timeout_ms=200 makes this a blocking 200ms wait
                     with self.thorlabs_sdk_lock:
                         frame = cam.get_pending_frame_or_null()
                 elif cam_instance.cam_type == 'ids_ueye':
                     frame = cam.wait_for_frame(timeout_ms=200)
+                else:
+                    break
 
                 if cam_instance.acq_stop_event.is_set():
                     break
 
                 if frame is None:
-                    continue  # timeout; pacing continues, next_trigger already advanced
+                    continue  # timeout; retry immediately
 
                 frame_count += 1
 
-                # --- Store for display ---
+                # --- Store latest frame for display (~30 fps display timer reads this) ---
                 with cam_instance.frame_lock:
                     cam_instance.pending_frame = frame
                     cam_instance.new_frame_available = True
                     cam_instance.acq_frame_count += 1
 
-                # --- Full-rate recording (in acquisition thread, not display timer) ---
+                # --- Record every frame at full acquisition rate ---
                 with cam_instance.video_lock:
                     if cam_instance.recording and cam_instance.video_writer:
                         try:
-                            # Use current ROI dimensions, not full sensor
                             w = cam_instance.current_frame_w or cam_instance.sensor_width
                             h = cam_instance.current_frame_h or cam_instance.sensor_height
                             raw = frame.image_buffer
@@ -1384,6 +1381,7 @@ class ThorlabsCameraApp(QMainWindow):
                             bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                             cam_instance.video_writer.write(bgr)
                             cam_instance.recorded_frame_count += 1
+                            cam_instance._rec_timestamps.append(time.monotonic())
                             duration = time.monotonic() - cam_instance.recording_start_time
                             if ((cam_instance.record_duration_limit > 0 and
                                      duration >= cam_instance.record_duration_limit) or
@@ -1396,13 +1394,13 @@ class ThorlabsCameraApp(QMainWindow):
 
                 cam_instance.consecutive_frame_errors = 0
 
-                # --- Periodic debug report every 5 seconds ---
+                # --- Periodic console report every 5 seconds ---
                 now = time.monotonic()
                 if now - last_report >= 5.0:
                     elapsed = now - last_report
                     print(f"{cam_id} ({cam_instance.cam_type}): "
                           f"{frame_count} frames in {elapsed:.1f}s "
-                          f"({frame_count/elapsed:.1f} fps, target={fps})")
+                          f"= {frame_count/elapsed:.1f} fps")
                     frame_count = 0
                     last_report = now
 
@@ -1539,10 +1537,11 @@ class ThorlabsCameraApp(QMainWindow):
                 with cam_instance.camera_lock:
                     print(f"Configuring camera {device_id}")
                     if cam_type == 'thorlabs':
-                        # Paced trigger mode: 1 frame per software trigger, blocking 200ms poll
-                        cam_instance.camera.frames_per_trigger_zero_for_unlimited = 1
+                        # Continuous mode: SDK delivers frames as fast as hardware allows.
+                        # get_pending_frame_or_null() with 200ms timeout blocks until frame ready.
+                        cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
                         cam_instance.camera.image_poll_timeout_ms = 200
-                        print("Thorlabs: frames_per_trigger=1, poll_timeout=200ms (paced trigger mode)")
+                        print("Thorlabs: frames_per_trigger=0 (continuous), poll_timeout=200ms")
                     else:
                         # IDS: arm() will set software trigger mode
                         cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
@@ -1571,7 +1570,11 @@ class ThorlabsCameraApp(QMainWindow):
                     cam_instance.camera.arm(num_buffers)
                     print(f"Armed with {num_buffers} buffers")
                     time.sleep(0.2)  # Short delay after arming
-                    # Paced mode: no initial trigger — acquisition loop handles all triggering
+                    # Continuous mode: one software trigger starts the stream; acquisition
+                    # loop consumes frames with get_pending_frame_or_null() — no re-triggering.
+                    if cam_type == 'thorlabs':
+                        cam_instance.camera.issue_software_trigger()
+                        print("Thorlabs: issued initial trigger to start continuous stream")
             except Exception as e:
                 error_msg = f"Error arming camera: {str(e)}"
                 print(error_msg)
@@ -1947,10 +1950,14 @@ class ThorlabsCameraApp(QMainWindow):
                                         cam_instance.sensor_height,
                                         step_x=4, step_y=2)
             else:
+                # Enforce Thorlabs SDK minimum lower-right coordinate to prevent crash
+                rr = cam_instance.camera.roi_range
                 x, y, w, h = clamp_roi(x, y, w, h,
                                         cam_instance.sensor_width,
                                         cam_instance.sensor_height,
-                                        step_x=1, step_y=1)
+                                        step_x=1, step_y=1,
+                                        min_lrx=rr.lower_right_x_pixels_min,
+                                        min_lry=rr.lower_right_y_pixels_min)
         except ValueError as e:
             self.show_error("ROI Error", str(e))
             return
@@ -1969,9 +1976,10 @@ class ThorlabsCameraApp(QMainWindow):
                     from thorlabs_tsi_sdk.tl_camera import ROI
                     cam_instance.camera.disarm()
                     cam_instance.camera.roi = ROI(x, y, x + w - 1, y + h - 1)
-                    cam_instance.camera.frames_per_trigger_zero_for_unlimited = 1
+                    cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
+                    cam_instance.camera.issue_software_trigger()  # start continuous stream
 
             cam_instance.roi = (x, y, w, h)
             cam_instance.current_frame_w = w
@@ -2016,9 +2024,10 @@ class ThorlabsCameraApp(QMainWindow):
                 elif cam_instance.cam_type == 'thorlabs':
                     cam_instance.camera.disarm()
                     cam_instance.camera.roi = None  # SDK interprets None as full sensor
-                    cam_instance.camera.frames_per_trigger_zero_for_unlimited = 1
+                    cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
+                    cam_instance.camera.issue_software_trigger()  # start continuous stream
 
             cam_instance.roi = None
             cam_instance.current_frame_w = cam_instance.sensor_width
@@ -2074,10 +2083,12 @@ class ThorlabsCameraApp(QMainWindow):
                         if cam_instance.video_writer.isOpened():
                             cam_instance.recording = True
                             cam_instance.recording_start_time = time.time()
+                            cam_instance._rec_filename = filename  # saved for timestamps file on stop
                             # Initialize recording limits
                             cam_instance.record_duration_limit = cam_instance.duration_spinbox.value()
                             cam_instance.record_frame_limit = cam_instance.framecount_spinbox.value()
                             cam_instance.recorded_frame_count = 0
+                            cam_instance._rec_timestamps = []  # reset for new recording
                         else:
                             cam_instance.video_writer = None
                     if cam_instance.recording:
@@ -2105,8 +2116,31 @@ class ThorlabsCameraApp(QMainWindow):
                     cam_instance.video_writer = None
                 cam_instance.recording = False
             cam_instance.record_button.setText("Start Recording")
-            cam_instance.recording_label.setText("Not Recording")
-            cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
+            # Report measured recording rate and save timestamps for validation
+            ts = cam_instance._rec_timestamps
+            if len(ts) >= 2:
+                n = len(ts)
+                span = ts[-1] - ts[0]
+                actual_fps = (n - 1) / span if span > 0 else 0
+                print(f"{cam_instance.name}: recorded {n} frames over {span:.3f}s "
+                      f"= {actual_fps:.1f} fps actual")
+                try:
+                    rec_file = getattr(cam_instance, '_rec_filename', '')
+                    ts_path = os.path.splitext(rec_file)[0] + '_timestamps.npy' if rec_file else ''
+                    if ts_path:
+                        np.save(ts_path, np.array(ts))
+                        print(f"Timestamps saved to {ts_path}")
+                        status_msg = f"Saved {n} frames at {actual_fps:.1f} fps (timestamps: {os.path.basename(ts_path)})"
+                    else:
+                        status_msg = f"Saved {n} frames at {actual_fps:.1f} fps"
+                except Exception as e:
+                    print(f"Error saving timestamps: {e}")
+                    status_msg = f"Saved {n} frames at {actual_fps:.1f} fps"
+                cam_instance.recording_label.setText(f"Recorded: {n} frames at {actual_fps:.1f} fps")
+                cam_instance.status_label.setText(status_msg)
+            else:
+                cam_instance.recording_label.setText("Not Recording")
+                cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
     
     def show_error(self, title, message):
         """Display an error dialog with the given title and message"""

@@ -141,6 +141,16 @@ class TestClampRoi(unittest.TestCase):
         with self.assertRaises(ValueError):
             clamp_roi(0, 0, 0, 100, 1280, 1024)
 
+    def test_min_lrx_expands_width(self):
+        # CS165MU lower_right_x_min=79: ROI(0,0,40,100) must expand to lrx >= 79
+        x, y, w, h = clamp_roi(0, 0, 40, 100, 1440, 1080, min_lrx=79)
+        self.assertGreaterEqual(x + w - 1, 79)
+
+    def test_min_lry_expands_height(self):
+        # CS165MU lower_right_y_min=3: ROI(0,0,100,2) must expand to lry >= 3
+        x, y, w, h = clamp_roi(0, 0, 100, 2, 1440, 1080, min_lry=3)
+        self.assertGreaterEqual(y + h - 1, 3)
+
 
 # ---------------------------------------------------------------------------
 # TestComputePacingDelay
