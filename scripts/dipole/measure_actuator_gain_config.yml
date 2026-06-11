@@ -1,0 +1,123 @@
+# Configuration for measure_actuator_gain.py
+#
+# Measures the flat actuator gain of the four electrodes (POLES_E1..E4) to each
+# particle degree of freedom (X, Y, Z) on the MAST-QG levitated microdiamond.
+#
+# See scripts/dipole/README.md for the full method, pitfalls, and deployment notes.
+# Resonance estimates (f0/Q) below are SEEDS; the script fits measured f0/Q from
+# the response (for X/Y) and divides out the plant to get the flat gains.
+
+prefix: "Y1:DMD"
+electrodes: ["E1", "E2", "E3", "E4"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
+
+# Particle DOF readback channels + resonance seeds + per-DOF tone density.
+#   n_tones MUST be >= number of electrodes so every electrode is driven near
+#   every resonance (each electrode-DOF coupling is measured every run).
+#   fit_plant: true  -> jointly fit f0/Q + per-electrode gains (needs n_tones > 4)
+#   fit_plant: false -> fix f0/Q at the seed, fit only the gains (use for Z)
+dofs:
+  x:
+    channel: "Y1:DMD-PARTICLE_X_IN1"
+    f0: 39.0
+    Q: 30.0
+    n_tones: 6            # DENSE: pins the Lorentzian (some electrodes get 2 tones)
+    tone_spacing_hz: 1.5
+    fit_plant: true
+  y:
+    channel: "Y1:DMD-PARTICLE_Y_IN1"
+    f0: 54.0
+    Q: 30.0
+    n_tones: 6            # DENSE
+    tone_spacing_hz: 1.5
+    fit_plant: true
+  z:
+    channel: "Y1:DMD-PARTICLE_Z_IN1"
+    f0: 5.0
+    Q: 10.0
+    n_tones: 4            # SPARSE: one tone per electrode; f0/Q fixed at seed.
+    tone_spacing_hz: 0.6  # Z is low-freq: few cycles/time, worst sensor coupling.
+    fit_plant: false
+
+measurement_channel_rate: 65536    # PARTICLE_*_IN1 sample rate (model is 65536 Hz)
+
+frequency_plan:
+  # HARD exclusion band: no excitation tone may land here. This is the trap-loss
+  # guard band (z-mode harmonics live at ~10-15 Hz). Tones in this band would
+  # both endanger the trap AND pollute the guard monitor (false aborts).
+  guard_band_hz: [10.0, 20.0]
+  min_bin_separation: 1   # tones kept >= this many FFT bins apart and bin-snapped
+  fft_bin_snap: true
+
+amplitude:
+  max_amplitude_counts: 32000      # hard cap per tone. DAC is 16-bit signed (+/-32768).
+  initial_amplitude_counts: 1000   # conservative starting drive (per tone)
+  amp_step_factor: 1.7             # multiplicative increase per amplitude trim step
+
+schroeder:
+  enabled: true   # phase the tones on each electrode to minimize crest factor
+
+trim:
+  target_coherence: 0.9
+  max_trim_iters: 4
+  time_first: true                 # raise measurement time/averages before amplitude
+  z_max_meas_time_s: 60.0          # cap Z time-first chase (Z=5 Hz -> few cycles/time)
+  z_accept_low_coherence: true     # do not gate the trim loop on Z coherence
+
+diag:
+  # diag is used ONLY to INJECT the simultaneous comb (its injection is correct).
+  # We do NOT use diag's SineResponse coefficient output -- in dtt 4.1.5 the per-tone
+  # excitation normalization (sineAnalyze on the drive channel) is unreliable for a
+  # multi-tone comb. Instead we capture the raw channels over NDS2 during the
+  # injection and compute the transfer functions + coherence ourselves (validated:
+  # raw loopback = 0.500 flat at every tone). diag's result XML is still saved for
+  # diaggui viewing/archiving. See README.md "How diag works".
+  #
+  # MeasurementTime Dim2 = [min_time_seconds, n_cycles]; the measurement runs for
+  # max(min_time, n_cycles/freq) -- seconds floor at low freq, cycles floor at high.
+  # We set min_time long enough to cover the NDS2 capture window below.
+  template_xml: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data/260611/actuators_sineResponse_template.xml"
+  premeasure: {min_time_s: 12.0, cycles: 10, settling_frac: 0.1}
+  measure:    {min_time_s: 28.0, cycles: 10, settling_frac: 0.1}
+  rampup_s: 1.0
+  rampdown_s: 1.0      # graceful excitation ramp-down on NORMAL completion
+  average_type: 0      # 0 = fixed (deterministic count); terminates promptly
+  window: 1            # 1 = Hann
+  diag_timeout_s: 300
+
+# Our own NDS2-capture-and-FFT analysis (replaces diag's coefficient output).
+analysis:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  segment_s: 2.0       # Welch segment length -> FFT bin = 1/segment_s = 0.5 Hz.
+                       # Tones are snapped to multiples of this bin.
+  premeasure_capture_s: 6.0   # raw capture duration for the short pre-measurement
+  measure_capture_s: 20.0     # raw capture duration for the full measurement
+  warmup_s: 3.0        # wait after diag run starts (settling+rampup) before capturing
+  save_raw_capture: true      # save the final raw NDS2 capture to raw_capture.h5
+                              # (enables `--analyze` re-processing; ~25-40 MB/run)
+  # diag is driven headless via: diag -l -f <cmdfile>. The post-connect command
+  # sequence lives in DIAG_COMMAND_SEQUENCE in measure_actuator_gain.py and is the
+  # FIRST thing to verify on the loopback (see README "Verify-first" list).
+
+guard_monitor:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  channels: ["Y1:DMD-PARTICLE_X_IN1", "Y1:DMD-PARTICLE_Y_IN1", "Y1:DMD-PARTICLE_Z_IN1"]
+  band_hz: [10.0, 20.0]
+  factor: 2.0          # abort if band-RMS exceeds factor x baseline on any DOF
+  baseline_seconds: 10
+  poll_seconds: 1
+
+safety:
+  poles_assume_open_loop: true
+  sw1_input_on_bit: 4        # cdsFilt SW1 bit 2 (input ON)
+  sw2_output_on_bit: 1024    # cdsFilt SW2 bit 10 (output ON)
+  restore_tramp_s: 2.0
+
+abort:
+  # An MEDM button (and the CLI helper abort_actuator_gain.sh) touches this file;
+  # the script polls it every loop and ramps the excitation to zero.
+  sentinel_path: "/tmp/abort_actuator_gain"
+
+output_root: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data"
+run_label: "actgain"
