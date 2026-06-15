@@ -3,3 +3,4 @@ __pycache__/
 snapshots/
 moku/20*_conf_sweep.yaml
 .claude/settings.local.json
+epics/auxioc*.snap

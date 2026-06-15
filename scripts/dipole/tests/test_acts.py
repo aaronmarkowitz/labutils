@@ -39,11 +39,34 @@ def test_assign_acts_channels_maps_correctly():
 
 
 def test_assign_acts_channels_raises_on_overflow():
-    """>8 tones per electrode raises ValueError."""
+    """>8 tones per electrode raises ValueError (8-column-per-row limit)."""
     cfg = _acts_cfg({"E1": 1})
     tones = [mag.Tone(freq=float(i), electrode="E1", dof="x") for i in range(9)]
     with pytest.raises(ValueError, match="only has 8 columns"):
         mag.assign_acts_channels(tones, cfg)
+
+
+def test_assign_acts_channels_raises_on_awg_slot_limit():
+    """Total tones > MAX_NUM_AWG=9 raises ValueError (AWG hardware limit)."""
+    cfg = _acts_cfg({"E1": 1, "E2": 2})
+    # 10 tones across two electrodes (5 each, within 8-col limit but 10 > 9 AWG slots)
+    tones = (
+        [mag.Tone(freq=float(i), electrode="E1", dof="x") for i in range(5)] +
+        [mag.Tone(freq=float(i + 100), electrode="E2", dof="y") for i in range(5)]
+    )
+    with pytest.raises(ValueError, match="MAX_NUM_AWG"):
+        mag.assign_acts_channels(tones, cfg)
+
+
+def test_assign_acts_channels_accepts_exactly_max_awg():
+    """Exactly MAX_NUM_AWG=9 tones across rows does NOT raise (boundary condition)."""
+    cfg = _acts_cfg({"E1": 1, "E2": 2})
+    tones = (
+        [mag.Tone(freq=float(i), electrode="E1", dof="x") for i in range(5)] +
+        [mag.Tone(freq=float(i + 100), electrode="E2", dof="y") for i in range(4)]
+    )
+    # Should not raise; 9 == MAX_NUM_AWG is exactly at the limit
+    mag.assign_acts_channels(tones, cfg)
 
 
 def test_assign_acts_channels_missing_electrode_raises():

@@ -1,0 +1,24 @@
+# Test params — minimal 2x2 grid, short timing
+cosgain_min: 8000
+cosgain_max: 32000
+cosgain_steps: 2
+
+freq_min: 3000
+freq_max: 9000
+freq_steps: 2
+
+wait_time_freq: 10.0
+wait_time_cosgain: 5.0
+record_duration: 10.0
+
+nds2_server: "192.168.1.11"
+nds2_port: 8088
+
+channels:
+  - Y1:DMD-PARTICLE_Y_IN1
+  - Y1:DMD-PARTICLE_X_IN1
+  - Y1:DMD-PARTICLE_CHARGE_OUT16
+  - Y1:DMD-PARTICLE_PHI_OUT16
+
+run_label: "test"
+output_root: "~/Dropbox/Microspheres/MAST-QG/worker1/data"

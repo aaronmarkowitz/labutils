@@ -63,6 +63,14 @@ import dttxml
 from scipy import signal as sp_signal
 from scipy import optimize as sp_optimize
 
+# Plotting module (optional — gracefully absent if matplotlib not installed).
+# Same directory as this script; sys.path entry added for direct-script invocation.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from plot_actuator_gain import plot_measurement as _plot_measurement
+except ImportError:
+    _plot_measurement = None
 
 GPS_OFFSET = 315964818  # GPS = Unix - GPS_OFFSET
 DAC_FULL_SCALE_COUNTS = 32768  # 16-bit signed DAC
@@ -317,6 +325,26 @@ def snapshot_poles(cfg: dict) -> dict:
     return snap
 
 
+def setup_poles_for_measurement(cfg: dict, snap: dict, dry_run: bool) -> None:
+    """Set GAIN=1 and turn OFF each module input switch.
+
+    GAIN=1 is required: EXC goes through GAIN, so a leftover GAIN=0 (e.g. from
+    a previous aborted run) would silently block all excitation. Input switch OFF
+    blocks the normal POLES input path while EXC still passes through GAIN to the
+    output.
+    """
+    sw1_bit = cfg["safety"]["sw1_input_on_bit"]
+    for e in cfg["electrodes"]:
+        b = _poles_base(cfg, e)
+        if dry_run:
+            on_off = "ON->OFF" if snap[e]["input_on"] else "OFF->OFF"
+            print(f"  DRY-RUN: {b}: GAIN=1 (was {snap[e]['gain']}), input {on_off}")
+            continue
+        caput(f"{b}_GAIN", 1)
+        if snap[e]["input_on"]:
+            caput(f"{b}_SW1", sw1_bit)
+
+
 def disable_poles_inputs(cfg: dict, snap: dict, dry_run: bool) -> None:
     """Turn OFF each module input switch (only toggle if currently on)."""
     sw1_bit = cfg["safety"]["sw1_input_on_bit"]
@@ -445,6 +473,9 @@ def restore_acts(cfg: dict, excl: list[str], snap: dict, dry_run: bool) -> None:
             caput(f"{base}_TRAMP", s["tramp"])
 
 
+_MAX_AWG_SLOTS = 9  # MAX_NUM_AWG from /usr/include/gds/dtt/awgtype.h
+
+
 def assign_acts_channels(tones: list[Tone], cfg: dict) -> None:
     """Assign one distinct ACTS EXC channel per tone (in place).
 
@@ -452,13 +483,27 @@ def assign_acts_channels(tones: list[Tone], cfg: dict) -> None:
     assigns columns 1..N sequentially. Sets tone.channel so that each tone has its
     own distinct physical excitation channel — this makes sizeA == sizeExc in diag's
     SineResponse, enabling its native per-tone coefficient extraction.
-    Raises ValueError if more than 8 tones per electrode (only 8 ACTS columns per row).
+
+    Raises ValueError if:
+    - more than 8 tones per electrode (only 8 ACTS columns per row), OR
+    - total distinct EXC channels > MAX_NUM_AWG (9): each channel consumes one AWG
+      slot, so the distinct-channel approach is limited to 9 tones total.
+      Use POLES_EXC (acts.enabled=false) for higher tone counts.
     """
     prefix = cfg["prefix"]
     elec_row = cfg["acts"]["electrode_row"]
     by_elec: dict[str, list[Tone]] = {}
     for t in tones:
         by_elec.setdefault(t.electrode, []).append(t)
+    # Check AWG slot limit BEFORE assigning channels so the error fires before
+    # any EPICS writes.
+    n_distinct = sum(len(ts) for ts in by_elec.values())
+    if n_distinct > _MAX_AWG_SLOTS:
+        raise ValueError(
+            f"acts.enabled=true requires one AWG slot per tone; {n_distinct} tones "
+            f"would exceed MAX_NUM_AWG={_MAX_AWG_SLOTS}. Reduce n_tones across all "
+            f"DOFs to <= {_MAX_AWG_SLOTS}, or set acts.enabled=false to use the "
+            f"POLES_EXC path (4 AWG slots regardless of tone count).")
     for elec, ts in by_elec.items():
         if elec not in elec_row:
             raise ValueError(f"Electrode '{elec}' not in acts.electrode_row config")
@@ -502,10 +547,10 @@ class GuardMonitor(threading.Thread):
         self.baseline: dict[str, float] = {}
         self.last: dict[str, float] = {}
         self.error: str | None = None
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self):
         try:
@@ -513,7 +558,7 @@ class GuardMonitor(threading.Thread):
             baseline_acc = {ch: [] for ch in self.channels}
             n_base = 0
             for bufs in conn.iterate(self.channels):
-                if self._stop.is_set():
+                if self._stop_event.is_set():
                     return
                 for buf in bufs:
                     fs = buf.channel.sample_rate
@@ -735,7 +780,8 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
     return captured, fs, result_xml
 
 
-def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict) -> list[dict]:
+def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict,
+                segment_s: float | None = None) -> list[dict]:
     """Per-tone transfer coefficients + coherence from raw captured data.
 
     For a tone driven on excitation channel E at frequency f, and DOF channel R:
@@ -743,9 +789,13 @@ def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict) -> list
         coh = |S_ER(f)|^2 / (S_EE(f) * S_RR(f))
     via Welch cross/auto spectra (segment = analysis.segment_s). Spectra are cached
     per channel/pair so each is computed once.
+
+    segment_s overrides cfg["analysis"]["segment_s"] when supplied (used by the trim
+    loop, which may increase segment_s beyond the config default to improve coherence).
     """
     dof_ch = {d: cfg["dofs"][d]["channel"] for d in ("x", "y", "z")}
-    nperseg = max(256, int(float(cfg["analysis"]["segment_s"]) * fs))
+    seg = segment_s if segment_s is not None else float(cfg["analysis"]["segment_s"])
+    nperseg = max(256, int(seg * fs))
     exc_names = sorted({_exc_channel(cfg, t) for t in tones})
 
     f_arr = None
@@ -948,9 +998,16 @@ def load_raw_capture(path: Path):
 
 
 def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
-                      cfg_text: str, electrodes: list[str]):
-    """Fit the plant + gains, assemble the matrix, write HDF5 + report. Shared by the
-    live measurement and the offline `--analyze` mode."""
+                      cfg_text: str, electrodes: list[str],
+                      plots_dir: Path | None = None, is_trim: bool = False):
+    """Fit the plant + gains, assemble the matrix, write HDF5 + report + plots.
+
+    plots_dir: override plot output directory (default: run_dir/plots/ for the final
+    measurement, run_dir/plots/trim_{label}/ for trim steps when is_trim=True).
+    is_trim: if True, pass is_trim=True to the plotter (skip gain matrix figure,
+    full scatter opacity regardless of coherence).
+    Shared by the live measurement and the offline `--analyze` mode.
+    """
     dof_fits = {}
     for d in ("x", "y", "z"):
         dd = cfg["dofs"][d]
@@ -960,6 +1017,18 @@ def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
     h5 = write_hdf5(run_dir, gain_matrix, dof_fits, records, cfg_text, electrodes)
     write_report(run_dir, gain_matrix, dof_fits, electrodes)
     print(f"Saved: {h5}")
+
+    # Bode plots
+    if _plot_measurement is not None:
+        pd = plots_dir if plots_dir is not None else (run_dir / "plots")
+        try:
+            written = _plot_measurement(records, dof_fits, electrodes, cfg, pd,
+                                        is_trim=is_trim)
+            for p in written:
+                print(f"  plot: {p}")
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: plotting failed ({e}); data saved successfully.")
+
     return gain_matrix, dof_fits
 
 
@@ -1033,16 +1102,37 @@ def main() -> None:
         run_dir = cap_path.resolve().parent / "reanalysis"
         run_dir.mkdir(exist_ok=True)
         print(f"Re-analyzing {cap_path} -> {run_dir}")
-        analyze_and_write(cfg, records, run_dir, cfg_text, electrodes)
+        plots_dir = _resolve_plots_dir(cfg, run_dir, label=None)
+        analyze_and_write(cfg, records, run_dir, cfg_text, electrodes,
+                          plots_dir=plots_dir)
         return
 
     # Tones are snapped to the analysis FFT bin (1 / Welch segment length) so each
-    # tone lands cleanly on a bin in our own spectral analysis.
-    bin_hz = 1.0 / float(cfg["analysis"]["segment_s"])
+    # tone lands cleanly on a bin in our own spectral analysis. segment_s may grow
+    # during the trim loop (doubling each step); tones stay on-bin because larger
+    # segments produce finer bin grids that are supersets of the original.
+    segment_s = float(cfg["analysis"]["segment_s"])
+    bin_hz = 1.0 / segment_s
+    premeasure_n_avgs = int(_resolve_capture_s(cfg["analysis"],
+                                               "premeasure_n_averages",
+                                               "premeasure_capture_s") / segment_s)
+    measure_n_avgs = int(_resolve_capture_s(cfg["analysis"],
+                                            "n_averages",
+                                            "measure_capture_s") / segment_s)
     premeasure = dict(cfg["diag"]["premeasure"])
-    premeasure["capture_s"] = _resolve_capture_s(cfg["analysis"], "premeasure_n_averages", "premeasure_capture_s")
+    premeasure["capture_s"] = premeasure_n_avgs * segment_s
     measure = dict(cfg["diag"]["measure"])
-    measure["capture_s"] = _resolve_capture_s(cfg["analysis"], "n_averages", "measure_capture_s")
+    measure["capture_s"] = measure_n_avgs * segment_s
+
+    # Ensure diag's min_time_s covers the full NDS2 capture window. diag drives
+    # the AWG excitation for ~min_time_s; if it finishes before our NDS2 capture
+    # is done, the excitation drops to zero mid-capture.
+    warmup = float(cfg["analysis"]["warmup_s"])
+    margin = 5.0  # seconds of extra injection past the capture window end
+    for m in (premeasure, measure):
+        required = warmup + m["capture_s"] + margin
+        if m["min_time_s"] < required:
+            m["min_time_s"] = required
 
     tones = generate_frequency_plan(cfg, bin_hz)
     init_amp = cfg["amplitude"]["initial_amplitude_counts"]
@@ -1106,7 +1196,35 @@ def main() -> None:
     def cleanup():
         guard.stop()
         if not restored[0]:
-            print("Restoring POLES state and ensuring excitation is zero...")
+            # Step 1: zero gains immediately (TRAMP=0, instant) so the CDS AWG
+            # comb, which continues injecting until MeasurementTime expires after
+            # the diag client is killed, cannot reach the DAC output.
+            print("Aborting: zeroing POLES gains (TRAMP=0) immediately...")
+            for e in cfg["electrodes"]:
+                b = _poles_base(cfg, e)
+                try:
+                    caput(f"{b}_TRAMP", 0)
+                    caput(f"{b}_GAIN", 0)
+                except Exception:
+                    pass
+            if acts_enabled:
+                for exc in exc_channels:
+                    base = exc[:-4]
+                    try:
+                        caput(f"{base}_TRAMP", 0)
+                        caput(f"{base}_GAIN", 0)
+                    except Exception:
+                        pass
+            # Step 2: wait for the AWG to drain before restoring GAIN. Restoring
+            # GAIN while the AWG is still outputting the comb would re-enable the
+            # excitation at the output.
+            print("Waiting for AWG excitation to drain (EXC channels → 0)...")
+            drained = _wait_for_awg_drain(cfg, exc_channels)
+            if not drained:
+                print("WARNING: AWG did not drain within timeout; restoring anyway.")
+            else:
+                print("AWG drained — restoring POLES state.")
+            # Step 3: restore all settings including GAIN (now safe to ramp up).
             try:
                 restore_poles(cfg, snap, dry_run=False)
                 if acts_enabled:
@@ -1115,7 +1233,7 @@ def main() -> None:
                 restored[0] = True
 
     try:
-        disable_poles_inputs(cfg, snap, dry_run=False)
+        setup_poles_for_measurement(cfg, snap, dry_run=False)
         if acts_enabled:
             setup_acts_for_measurement(cfg, exc_channels, acts_snap, dry_run=False)
         guard.start()
@@ -1128,27 +1246,48 @@ def main() -> None:
             time.sleep(0.5)
         print(f"  baseline: {guard.baseline}")
 
-        # ---------------- adaptive trim loop (time-first, then amplitude) -------
+        # ---------------- adaptive trim loop (segment_s-first, then amplitude) ----
         # Each iteration: diag injects the comb, we capture raw NDS2 and compute the
         # transfer functions + coherence ourselves (diag's coefficients are unused).
+        # Trim strategy: first double segment_s (longer FFT segments → narrower bins →
+        # better SNR per bin → higher true coherence), keeping n_averages fixed so
+        # capture_s grows proportionally. Once segment_s hits trim.segment_s_max,
+        # raise amplitudes of under-coherent electrodes.
+        trim_segment_s = segment_s
         meas = dict(premeasure)
         records = None
         for it in range(cfg["trim"]["max_trim_iters"] + 1):
             _check_aborts(abort_event, sentinel)
             if cfg["schroeder"].get("enabled", True):
                 assign_schroeder_phases(tones)
-            print(f"[trim {it}] min_time={meas['min_time_s']}s capture={meas['capture_s']}s "
+            print(f"[trim {it}] segment_s={trim_segment_s:.2f}s "
+                  f"min_time={meas['min_time_s']}s capture={meas['capture_s']:.1f}s "
                   f"max_amp={max(t.amp_counts for t in tones):.0f} cts -> inject+capture...")
             captured, fs, _ = inject_and_capture(cfg, tones, meas, run_dir,
                                                  f"{it:02d}", abort_event, sentinel)
-            records = compute_tfs(captured, fs, tones, cfg)
+            records = compute_tfs(captured, fs, tones, cfg, segment_s=trim_segment_s)
+            # Trim-step plots: fit plant+gains and plot without writing HDF5/report.
+            if _plot_measurement is not None:
+                trim_plots_dir = _resolve_plots_dir(cfg, run_dir, None) / f"trim_{it:02d}"
+                try:
+                    trim_dof_fits = {}
+                    for d in ("x", "y", "z"):
+                        dd = cfg["dofs"][d]
+                        trim_dof_fits[d] = fit_dof(records, d, electrodes,
+                                                   float(dd["f0"]), float(dd["Q"]),
+                                                   bool(dd.get("fit_plant", True)))
+                    _plot_measurement(records, trim_dof_fits, electrodes, cfg,
+                                      trim_plots_dir, is_trim=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  WARNING: trim-step plotting failed ({e})")
             worst = worst_xy_coherence(records)
             print(f"  worst X/Y coherence = {worst:.3f} (target {cfg['trim']['target_coherence']})")
             if worst >= cfg["trim"]["target_coherence"]:
                 break
             if it == cfg["trim"]["max_trim_iters"] or args.premeasure_only:
                 break
-            meas, changed_amp = _trim_step(cfg, tones, records, meas)
+            meas, trim_segment_s, changed_amp = _trim_step(
+                cfg, tones, records, meas, trim_segment_s, premeasure_n_avgs)
             if changed_amp:
                 print("  (raised amplitudes; Schroeder phases will be recomputed)")
 
@@ -1157,20 +1296,34 @@ def main() -> None:
             return
 
         # ---------------- final full measurement --------------------------------
+        # Use trim_segment_s (which may have grown during trim) for the final
+        # measurement. capture_s = measure_n_avgs * trim_segment_s so we keep the
+        # configured number of averages at the converged segment length.
+        final_segment_s = trim_segment_s
+        final_capture_s = measure_n_avgs * final_segment_s
+        final_meas = {
+            **measure,
+            "capture_s":  final_capture_s,
+            "min_time_s": max(measure["min_time_s"],
+                              warmup + final_capture_s + margin),
+        }
         _check_aborts(abort_event, sentinel)
         if cfg["schroeder"].get("enabled", True):
             assign_schroeder_phases(tones)
-        print(f"[final] min_time={measure['min_time_s']}s capture={measure['capture_s']}s "
+        print(f"[final] segment_s={final_segment_s:.2f}s "
+              f"min_time={final_meas['min_time_s']}s capture={final_meas['capture_s']:.1f}s "
               f"-> inject+capture...")
-        captured, fs, _ = inject_and_capture(cfg, tones, measure, run_dir,
+        captured, fs, _ = inject_and_capture(cfg, tones, final_meas, run_dir,
                                              "final", abort_event, sentinel)
         _check_aborts(abort_event, sentinel)
         if cfg["analysis"].get("save_raw_capture", True):
             save_raw_capture(run_dir, captured, fs, tones, cfg_text)
-        records = compute_tfs(captured, fs, tones, cfg)
+        records = compute_tfs(captured, fs, tones, cfg, segment_s=final_segment_s)
 
         # ---------------- analysis (shared with --analyze) ---------------------
-        analyze_and_write(cfg, records, run_dir, cfg_text, electrodes)
+        final_plots_dir = _resolve_plots_dir(cfg, run_dir, label=None)
+        analyze_and_write(cfg, records, run_dir, cfg_text, electrodes,
+                          plots_dir=final_plots_dir)
 
     except AbortRequested as e:
         print(f"\n*** ABORT: {e} ***  (excitation will be zeroed, POLES restored)")
@@ -1186,21 +1339,36 @@ def main() -> None:
         print(f"Output: {run_dir}")
 
 
-def _trim_step(cfg, tones, records, meas):
-    """Time-first then amplitude. Returns (new_meas, changed_amp)."""
+def _trim_step(cfg, tones, records, meas, segment_s: float, n_averages: int):
+    """Segment-first then amplitude. Returns (new_meas, new_segment_s, changed_amp).
+
+    Step 1 — segment_s: double the Welch segment length (halves the bin, improves SNR
+    per bin, raises true coherence) until trim.segment_s_max is reached. capture_s is
+    always kept at n_averages * segment_s so the number of averages stays fixed and the
+    coherence estimate reliability doesn't degrade as segments get longer.
+
+    Tones were snapped to multiples of the original (minimum) segment_s bin, so they
+    remain on-bin for any doubled segment_s (finer bins → original bins are a subset).
+
+    Step 2 — amplitude: once segment_s is at its cap, raise amplitudes of the
+    under-coherent electrodes by amp_step_factor up to max_amplitude_counts.
+    """
     target = cfg["trim"]["target_coherence"]
-    z_cap = cfg["trim"]["z_max_meas_time_s"]
-    # current worst X/Y tone
+    seg_max = float(cfg["trim"]["segment_s_max"])
     changed_amp = False
     new_meas = dict(meas)
-    # 1) time-first: lengthen the capture (more Welch averages -> higher coherence)
-    #    and the diag injection window together, bounded by the Z cap so the
-    #    low-frequency Z tones don't dominate the time budget.
-    if new_meas["min_time_s"] * 1.8 <= z_cap:
-        new_meas["min_time_s"] = round(new_meas["min_time_s"] * 1.8, 2)
-        new_meas["capture_s"] = round(new_meas["capture_s"] * 1.8, 2)
-        return new_meas, changed_amp
-    # 2) amplitude: raise the under-coherent X/Y tones' electrodes up to the cap.
+
+    # 1) segment_s: double while under the cap
+    warmup = float(cfg["analysis"]["warmup_s"])
+    margin = 5.0
+    new_seg = segment_s * 2.0
+    if new_seg <= seg_max + 1e-9:
+        new_meas["capture_s"] = round(n_averages * new_seg, 4)
+        new_meas["min_time_s"] = max(new_meas["min_time_s"],
+                                     warmup + new_meas["capture_s"] + margin)
+        return new_meas, new_seg, changed_amp
+
+    # 2) amplitude: raise under-coherent X/Y electrodes up to the cap
     step = cfg["amplitude"]["amp_step_factor"]
     cap = cfg["amplitude"]["max_amplitude_counts"]
     by_coh = {}
@@ -1215,7 +1383,7 @@ def _trim_step(cfg, tones, records, meas):
             if newamp > t.amp_counts:
                 t.amp_counts = newamp
                 changed_amp = True
-    return new_meas, changed_amp
+    return new_meas, segment_s, changed_amp
 
 
 def _make_run_dir(cfg, label):
@@ -1229,6 +1397,19 @@ def _make_run_dir(cfg, label):
     return run_dir
 
 
+def _resolve_plots_dir(cfg: dict, run_dir: Path, label: str | None) -> Path:
+    """Return the plot output directory for the final measurement.
+
+    If cfg["plots_root"] is set (and not None/empty), plots go to
+    plots_root/<run_dir.name>/ so they mirror the data layout but live in a
+    separate tree. Otherwise, defaults to run_dir/plots/.
+    """
+    plots_root_raw = cfg.get("plots_root", None)
+    if plots_root_raw:
+        return Path(str(plots_root_raw)).expanduser() / run_dir.name
+    return run_dir / "plots"
+
+
 def _print_plan(tones, electrodes):
     print("  Tone plan (freq Hz -> electrode, intended DOF):")
     for t in sorted(tones, key=lambda x: x.freq):
@@ -1238,6 +1419,40 @@ def _print_plan(tones, electrodes):
 def _kill_diag():
     """Best-effort fast stop of any running diag excitation."""
     subprocess.run(["pkill", "-f", "diag -l -f"], capture_output=True)
+
+
+def _wait_for_awg_drain(cfg: dict, exc_channels: list[str],
+                        timeout_s: float = 90.0, poll_s: float = 1.0) -> bool:
+    """Poll NDS2 until every EXC channel RMS drops below 1 count, or timeout.
+
+    Returns True if the AWG drained within timeout_s, False if it timed out.
+    Called from cleanup() after GAIN=0 is confirmed written, so the AWG
+    output cannot reach the DAC even while we wait. We poll anyway to know
+    when it is safe to ramp GAIN back up.
+
+    Uses a fresh NDS2 connection (the main one may have been closed by abort).
+    Silently returns False on any NDS2 error so cleanup() always continues.
+    """
+    an = cfg.get("analysis", {})
+    server = an.get("nds2_server", "192.168.1.11")
+    port = int(an.get("nds2_port", 8088))
+    threshold = 1.0          # counts — AWG output is zero when below this
+    deadline = time.monotonic() + timeout_s
+    try:
+        conn = nds2.connection(server, port)
+        for bufs in conn.iterate(exc_channels):
+            quiet = all(
+                float(np.sqrt(np.mean(np.asarray(b.data, dtype=np.float64) ** 2)))
+                < threshold
+                for b in bufs
+            )
+            if quiet:
+                return True
+            if time.monotonic() > deadline:
+                return False
+    except Exception:
+        pass
+    return False
 
 
 if __name__ == "__main__":

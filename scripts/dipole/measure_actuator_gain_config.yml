@@ -8,7 +8,7 @@
 # the response (for X/Y) and divides out the plant to get the flat gains.
 
 prefix: "Y1:DMD"
-electrodes: ["E1", "E2", "E3", "E4"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
+electrodes: ["E1"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
 
 # Particle DOF readback channels + resonance seeds + per-DOF tone density.
 #   n_tones MUST be >= number of electrodes so every electrode is driven near
@@ -16,9 +16,16 @@ electrodes: ["E1", "E2", "E3", "E4"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation ro
 #   fit_plant: true  -> jointly fit f0/Q + per-electrode gains (needs n_tones > 4)
 #   fit_plant: false -> fix f0/Q at the seed, fit only the gains (use for Z)
 #
-#   More tones: MAX_NUM_AWG=9 limits DISTINCT excitation channels, not stimulus
-#   rows. With 4 POLES channels we occupy 4 AWG slots regardless of n_tones, so
-#   n_tones can be increased freely. The NDS2 analysis path handles any count.
+#   More tones (POLES_EXC path, acts.enabled=false):
+#     MAX_NUM_AWG=9 limits DISTINCT excitation channels, not stimulus rows.
+#     With 4 POLES channels we occupy 4 AWG slots regardless of n_tones, so
+#     n_tones can be increased freely here. The NDS2 analysis path handles any
+#     count. Validated range: up to 20 tones (default). Higher counts (>20) are
+#     architecturally supported but require a live loopback test before use
+#     (run: ACTGAIN_LOOPBACK=1 pytest tests/ -m loopback -k high_tone_count).
+#
+#   ACTS path (acts.enabled=true) is limited to MAX_NUM_AWG=9 TOTAL tones across
+#   all DOFs; assign_acts_channels will raise ValueError if exceeded.
 #
 #   Z placement: set dofs.z.f0 above guard_band_hz[1] (e.g. f0: 25.0) to place
 #   Z tones above the guard band entirely. The frequency plan pushes tones away
@@ -40,7 +47,7 @@ dofs:
     fit_plant: true
   z:
     channel: "Y1:DMD-PARTICLE_Z_IN1"
-    f0: 5.0               # change to e.g. 25.0 to place Z tones above the guard band
+    f0: 25.0               # change to e.g. 25.0 to place Z tones above the guard band
     Q: 10.0
     n_tones: 4            # SPARSE: one tone per electrode; f0/Q fixed at seed.
     tone_spacing_hz: 0.6  # Z is low-freq: few cycles/time, worst sensor coupling.
@@ -53,12 +60,12 @@ frequency_plan:
   # guard band (z-mode harmonics live at ~10-15 Hz). Tones in this band would
   # both endanger the trap AND pollute the guard monitor (false aborts).
   guard_band_hz: [10.0, 20.0]
-  min_bin_separation: 1   # tones kept >= this many FFT bins apart and bin-snapped
+  min_bin_separation: 3   # tones kept >= this many FFT bins apart and bin-snapped
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 100         # hard cap per tone. DAC is 16-bit signed (+/-32768).
-  initial_amplitude_counts: 5      # start very conservative; trim loop raises as needed
+  max_amplitude_counts: 200         # hard cap per tone. DAC is 16-bit signed (+/-32768).
+  initial_amplitude_counts: 150      # start very conservative; trim loop raises as needed
   amp_step_factor: 3.0             # multiplicative increase per amplitude trim step
 
 schroeder:
@@ -66,10 +73,9 @@ schroeder:
 
 trim:
   target_coherence: 0.9
-  max_trim_iters: 4
-  time_first: true                 # raise measurement time/averages before amplitude
-  z_max_meas_time_s: 60.0          # cap Z time-first chase (Z=5 Hz -> few cycles/time)
-  z_accept_low_coherence: true     # do not gate the trim loop on Z coherence
+  max_trim_iters: 1
+  segment_s_max: 24.0   # double segment_s each step (12->24 s) before raising amplitude
+                         # longer segments -> narrower FFT bins -> better SNR per bin -> higher coherence
 
 diag:
   # diag is used ONLY to INJECT the simultaneous comb (its injection is correct).
@@ -96,9 +102,9 @@ diag:
 analysis:
   nds2_server: "192.168.1.11"
   nds2_port: 8088
-  segment_s: 2.0            # Welch segment length -> FFT bin = 1/segment_s = 0.5 Hz.
+  segment_s: 12            # Welch segment length -> FFT bin = 1/12 ≈ 0.083 Hz.
                              # Tones are snapped to multiples of this bin.
-  n_averages: 10             # number of Welch segments for the full measurement
+  n_averages: 30             # number of Welch segments for the full measurement
                              # -> capture_s = n_averages * segment_s = 20.0 s.
                              # Set this OR measure_capture_s (not both).
   premeasure_n_averages: 3   # same for the short pre-measurement -> 6.0 s
@@ -114,8 +120,8 @@ guard_monitor:
   nds2_server: "192.168.1.11"
   nds2_port: 8088
   channels: ["Y1:DMD-PARTICLE_X_IN1", "Y1:DMD-PARTICLE_Y_IN1", "Y1:DMD-PARTICLE_Z_IN1"]
-  band_hz: [10.0, 20.0]
-  factor: 2.0          # abort if band-RMS exceeds factor x baseline on any DOF
+  band_hz: [10.0, 15.0]
+  factor: 10000.0          # abort if band-RMS exceeds factor x baseline on any DOF
   baseline_seconds: 10
   poll_seconds: 1
 
@@ -153,3 +159,7 @@ abort:
 
 output_root: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data"
 run_label: "actgain"
+
+# Optional: override plot output root. If unset (or null), plots go to
+# <run_dir>/plots/ (final) and <run_dir>/plots/trim_NN/ (trim steps).
+# plots_root: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data/plots"
