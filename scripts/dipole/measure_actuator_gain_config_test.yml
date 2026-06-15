@@ -1,0 +1,85 @@
+# Loopback self-test configuration for measure_actuator_gain.py.
+# Uses ACTS_8_1..8_4_EXC as excitation channels (one per tone) -> LOS_IN1 as
+# the readback for all three DOFs.  Row 8 columns 1-7 have GAIN=0 by default;
+# setup_acts_for_measurement sets them to GAIN=1 for the duration of the test
+# and restores on exit.
+#
+# Run with:
+#   ACTGAIN_LOOPBACK=1 /var/lib/cds-conda/base/envs/cds-testing/bin/python3 \
+#       -m pytest tests/ -m loopback
+
+prefix: "Y1:DMD"
+electrodes: ["LB"]   # single pseudoelectrode so all tones go to row 8
+
+dofs:
+  x: {channel: "Y1:DMD-LOS_IN1", f0: 39.0, Q: 30.0, n_tones: 1, tone_spacing_hz: 1.5, fit_plant: false}
+  y: {channel: "Y1:DMD-LOS_IN1", f0: 54.0, Q: 30.0, n_tones: 1, tone_spacing_hz: 1.5, fit_plant: false}
+  z: {channel: "Y1:DMD-LOS_IN1", f0: 5.0,  Q: 10.0, n_tones: 2, tone_spacing_hz: 0.5, fit_plant: false}
+
+measurement_channel_rate: 65536
+
+frequency_plan:
+  guard_band_hz: [10.0, 20.0]
+  min_bin_separation: 1
+  fft_bin_snap: true
+
+amplitude:
+  max_amplitude_counts: 500
+  initial_amplitude_counts: 100    # loopback: no particle at risk, use a clear signal
+  amp_step_factor: 3.0
+
+schroeder:
+  enabled: true
+
+trim:
+  target_coherence: 0.9
+  max_trim_iters: 0
+  time_first: true
+  z_max_meas_time_s: 30.0
+  z_accept_low_coherence: true
+
+diag:
+  template_xml: ""
+  premeasure: {min_time_s: 12.0, cycles: 10, settling_frac: 0.1}
+  measure:    {min_time_s: 12.0, cycles: 10, settling_frac: 0.1}
+  rampup_s: 1.0
+  rampdown_s: 1.0
+  average_type: 0
+  window: 1
+  diag_timeout_s: 120
+
+analysis:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  segment_s: 2.0
+  premeasure_capture_s: 6.0
+  measure_capture_s: 8.0
+  warmup_s: 3.0
+  save_raw_capture: false
+
+# ACTS row 8 is the loopback row (columns 1..N used for distinct EXC channels)
+acts:
+  enabled: true
+  electrode_row:
+    LB: 8
+
+guard_monitor:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  channels: ["Y1:DMD-LOS_IN1"]
+  band_hz: [10.0, 20.0]
+  factor: 2.0
+  baseline_seconds: 5
+  poll_seconds: 1
+
+safety:
+  poles_assume_open_loop: true
+  sw1_input_on_bit: 4
+  sw2_output_on_bit: 1024
+  restore_tramp_s: 2.0
+
+abort:
+  sentinel_path: "/tmp/abort_actuator_gain"
+
+output_root: "/tmp/actgain_loopback_out"
+run_label: "actgain_loopback"

@@ -7,13 +7,17 @@ from moku.instruments import WaveformGenerator
 from datetime import datetime
 
 
+def format_ip(addr):
+    # IPv6 addresses need brackets in URLs; IPv4 addresses must not have them
+    return '[' + addr + ']' if ':' in addr else addr
+
 #Load IP address from config file, or ask user to input it
 ip = None
 try:
     with open('conf_sweep.yaml', 'r') as file:
         conf_ip = yaml.safe_load(file)
     if 'ip_address' in conf_ip and conf_ip['ip_address']:
-        ip = '[' + conf_ip['ip_address'] + ']'
+        ip = format_ip(conf_ip['ip_address'])
         print(f"Loaded IP address from conf_sweep.yaml: {conf_ip['ip_address']}")
 except Exception as e:
     print(f"Could not read IP from conf_sweep.yaml: {e}")
@@ -21,7 +25,7 @@ except Exception as e:
 ip_flag = True
 while ip_flag:
     if ip is None:
-        ip = '[' + input('Please enter the IP address of the moku device you would like to connect to: ') + ']'
+        ip = format_ip(input('Please enter the IP address of the moku device you would like to connect to: '))
     try:
         # Connect to your Moku by its ip address ip
         # force_connect will overtake an existing connection

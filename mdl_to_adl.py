@@ -891,6 +891,86 @@ class AdlWriter:
         self.lines.append('\t}')
         self.lines.append('}')
 
+    def write_matrix_cell(self, x, y, w, h, channel, button_label, button_path):
+        """Emit one cdsFiltMuxMatrix cell: two dynamic composites + a related-display button."""
+        # Composite shown when value is non-zero (active): white-on-dark
+        self.lines.append('composite {')
+        self.lines.append(f'  object {{')
+        self.lines.append(f'    x={x}')
+        self.lines.append(f'    y={y}')
+        self.lines.append(f'    width={w}')
+        self.lines.append(f'    height={h}')
+        self.lines.append(f'  }}')
+        self.lines.append(f'  children {{')
+        self.lines.append(f'  "text entry" {{')
+        self.lines.append(f'    object {{')
+        self.lines.append(f'      x={x}')
+        self.lines.append(f'      y={y}')
+        self.lines.append(f'      width={w}')
+        self.lines.append(f'      height={h}')
+        self.lines.append(f'    }}')
+        self.lines.append(f'    control {{')
+        self.lines.append(f'      chan="{channel}"')
+        self.lines.append(f'      clr=14')
+        self.lines.append(f'      bclr=60')
+        self.lines.append(f'    }}')
+        self.lines.append(f'    limits {{')
+        self.lines.append(f'    }}')
+        self.lines.append(f'  }} ')
+        self.lines.append(f'  }}')
+        self.lines.append(f'  "dynamic attribute" {{')
+        self.lines.append(f'    vis="if not zero"')
+        self.lines.append(f'    chan="{channel}"')
+        self.lines.append(f'  }}')
+        self.lines.append('}')
+        # Composite shown when value is zero (inactive): dim
+        self.lines.append('composite {')
+        self.lines.append(f'  object {{')
+        self.lines.append(f'    x={x}')
+        self.lines.append(f'    y={y}')
+        self.lines.append(f'    width={w}')
+        self.lines.append(f'    height={h}')
+        self.lines.append(f'  }}')
+        self.lines.append(f'  children {{')
+        self.lines.append(f'  "text entry" {{')
+        self.lines.append(f'    object {{')
+        self.lines.append(f'      x={x}')
+        self.lines.append(f'      y={y}')
+        self.lines.append(f'      width={w}')
+        self.lines.append(f'      height={h}')
+        self.lines.append(f'    }}')
+        self.lines.append(f'    control {{')
+        self.lines.append(f'      chan="{channel}"')
+        self.lines.append(f'      clr=10')
+        self.lines.append(f'      bclr=5')
+        self.lines.append(f'    }}')
+        self.lines.append(f'    limits {{')
+        self.lines.append(f'    }}')
+        self.lines.append(f'  }} ')
+        self.lines.append(f'  }}')
+        self.lines.append(f'  "dynamic attribute" {{')
+        self.lines.append(f'    vis="if zero"')
+        self.lines.append(f'    chan="{channel}"')
+        self.lines.append(f'  }}')
+        self.lines.append('}')
+        # Related-display button below the text entry
+        self.lines.append('"related display" {')
+        self.lines.append(f'\tobject {{')
+        self.lines.append(f'\t\tx={x}')
+        self.lines.append(f'\t\ty={y + h}')
+        self.lines.append(f'\t\twidth={w}')
+        self.lines.append(f'\t\theight={h}')
+        self.lines.append(f'\t}}')
+        self.lines.append(f'\tdisplay[0] {{')
+        self.lines.append(f'\t\tlabel="{button_label}"')
+        self.lines.append(f'\t\tname="{button_path}"')
+        self.lines.append(f'\t}}')
+        self.lines.append(f'\tclr=14')
+        self.lines.append(f'\tbclr=25')
+        self.lines.append(f'\tlabel="{button_label}"')
+        self.lines.append(f'\tvisual="a row of buttons"')
+        self.lines.append('}')
+
     def get_text(self):
         return '\n'.join(self.lines) + '\n'
 
@@ -1008,8 +1088,10 @@ class AdlGenerator:
                                       display_name, clr=CLR_BLACK)
 
             elif tag == 'cdsFiltMuxMatrix':
-                target = os.path.join(self.medm_dir,
-                                      f"{self.prefix}_{block.name}.adl")
+                labeled = self._generate_labeled_matrix_adl(
+                    block, system.lines, block_map)
+                target = labeled if labeled else os.path.join(
+                    self.medm_dir, f"{self.prefix}_{block.name}.adl")
                 writer.write_related_display(bx, by, bw, bh, block.name,
                                              target, CLR_BLACK, CLR_PINK,
                                              button_label="")
@@ -1315,6 +1397,212 @@ class AdlGenerator:
             f.write(writer.get_text())
         self.generated_files.append(filepath)
         print(f"  Generated: {filepath}")
+
+    # -----------------------------------------------------------------------
+    # cdsFiltMuxMatrix labeled screen generation
+    # -----------------------------------------------------------------------
+
+    _MATRIX_COL_X0 = 80
+    _MATRIX_ROW_Y0 = 80
+    _MATRIX_COL_W  = 70
+    _MATRIX_ROW_H  = 60
+    _MATRIX_CELL_W = 60
+    _MATRIX_CELL_H = 25
+
+    def _get_matrix_dims(self, block_name):
+        """Read n_rows, n_cols from the autogenerated ADL for this matrix block.
+
+        Scans channel names of the form PREFIX_BLOCKNAME_R_C_GAIN and returns
+        (max_row, max_col).  Returns (0, 0) if the file is missing.
+        """
+        adl_path = os.path.join(self.medm_dir, f"{self.prefix}_{block_name}.adl")
+        if not os.path.isfile(adl_path):
+            return 0, 0
+        pattern = re.compile(
+            rf'{re.escape(self.prefix[:2])}:{re.escape(self.prefix[2:])}'
+            rf'-{re.escape(block_name)}_(\d+)_(\d+)_GAIN'
+        )
+        max_row = max_col = 0
+        with open(adl_path) as f:
+            for line in f:
+                m = pattern.search(line)
+                if m:
+                    max_row = max(max_row, int(m.group(1)))
+                    max_col = max(max_col, int(m.group(2)))
+        return max_row, max_col
+
+    def _find_line(self, lines, *, src_block=None, src_port=None,
+                   dst_block=None, dst_port=None):
+        """Return the first MdlLine matching all supplied (non-None) criteria."""
+        for ln in lines:
+            if src_block is not None and ln.src_block != src_block:
+                continue
+            if src_port is not None and ln.src_port != src_port:
+                continue
+            if dst_block is not None and ln.dst_block != dst_block:
+                continue
+            if dst_port is not None and ln.dst_port != dst_port:
+                continue
+            return ln
+        return None
+
+    def _extract_matrix_labels(self, block, system_lines, block_map):
+        """Derive column and row signal labels from the mdl topology.
+
+        Columns: trace backwards through the upstream Mux to Outport names
+                 inside the feeding SubSystem.
+        Rows:    trace forwards through the downstream Demux to Inport names
+                 inside the receiving SubSystem.
+
+        Falls back to "col N" / "row N" for any port that can't be resolved.
+        """
+        n_rows, n_cols = self._get_matrix_dims(block.name)
+
+        # --- column labels ---
+        col_labels = [f"col {c}" for c in range(1, n_cols + 1)]
+        mux_line = self._find_line(system_lines, dst_block=block.name)
+        if mux_line:
+            mux_block = block_map.get(mux_line.src_block)
+            if mux_block:
+                for c in range(1, n_cols + 1):
+                    feed = self._find_line(system_lines,
+                                           dst_block=mux_block.name, dst_port=c)
+                    if feed and feed.src_block:
+                        src = block_map.get(feed.src_block)
+                        if src and src.subsystem:
+                            for b in src.subsystem.blocks:
+                                if (b.block_type == 'Outport'
+                                        and b.port_num == feed.src_port):
+                                    col_labels[c - 1] = b.name.replace('\\n', ' ')
+                                    break
+
+        # --- row labels ---
+        row_labels = [f"row {r}" for r in range(1, n_rows + 1)]
+        demux_line = self._find_line(system_lines, src_block=block.name)
+        if demux_line:
+            demux_block = block_map.get(demux_line.dst_block)
+            if demux_block:
+                for r in range(1, n_rows + 1):
+                    out_line = self._find_line(system_lines,
+                                               src_block=demux_block.name,
+                                               src_port=r)
+                    if out_line and out_line.dst_block:
+                        dst = block_map.get(out_line.dst_block)
+                        if dst and dst.subsystem:
+                            for b in dst.subsystem.blocks:
+                                if (b.block_type == 'Inport'
+                                        and b.port_num == out_line.dst_port):
+                                    row_labels[r - 1] = b.name.replace('\\n', ' ')
+                                    break
+
+        return col_labels, row_labels
+
+    def _generate_labeled_matrix_adl(self, block, system_lines, block_map):
+        """Generate a labeled matrix screen for a cdsFiltMuxMatrix block.
+
+        Returns the output filepath on success, or empty string if the
+        autogenerated ADL is not available (so caller falls back to plain screen).
+        """
+        n_rows, n_cols = self._get_matrix_dims(block.name)
+        if n_rows == 0 or n_cols == 0:
+            return ""
+
+        col_labels, row_labels = self._extract_matrix_labels(
+            block, system_lines, block_map)
+
+        ifo = self.prefix[:2]
+        model_sfx = self.prefix[2:]
+        chan_prefix = f"{ifo}:{model_sfx}-{block.name}"
+        subscreen_dir = os.path.join(self.medm_dir, f"{self.prefix}_{block.name}")
+        filepath = os.path.join(self.output_dir,
+                                f"{self.prefix}_{block.name}_LABELED.adl")
+
+        CX0 = self._MATRIX_COL_X0
+        RY0 = self._MATRIX_ROW_Y0
+        CW  = self._MATRIX_COL_W
+        RH  = self._MATRIX_ROW_H
+        CW2 = self._MATRIX_CELL_W
+        CH  = self._MATRIX_CELL_H
+
+        display_w = CX0 + n_cols * CW + 10
+        display_h = RY0 + n_rows * RH + 35
+
+        title = f"{self.prefix} {block.name} Matrix"
+
+        writer = AdlWriter()
+        # Write header — override display colors to match existing labeled files
+        writer.lines.append('')
+        writer.lines.append('file {')
+        writer.lines.append(f'\tname="{filepath}"')
+        writer.lines.append('\tversion=030117')
+        writer.lines.append('}')
+        writer.lines.append('display {')
+        writer.lines.append('\tobject {')
+        writer.lines.append('\t\tx=100')
+        writer.lines.append('\t\ty=100')
+        writer.lines.append(f'\t\twidth={display_w}')
+        writer.lines.append(f'\t\theight={display_h}')
+        writer.lines.append('\t}')
+        writer.lines.append(f'\tclr=5')
+        writer.lines.append(f'\tbclr=12')
+        writer.lines.append('\tcmap=""')
+        writer.lines.append('\tgridSpacing=5')
+        writer.lines.append('\tgridOn=0')
+        writer.lines.append('\tsnapToGrid=0')
+        writer.lines.append('}')
+        writer._write_colormap()
+
+        # Title and column header labels
+        writer.write_text(10, 5, display_w - 20, 20, title,
+                          clr=CLR_BLACK, align="horiz. centered")
+        writer.write_text(CX0, 25, n_cols * CW, 15, "Inputs >>>",
+                          clr=CLR_BLACK, align="horiz. centered")
+        for c, lbl in enumerate(col_labels):
+            writer.write_text(CX0 + c * CW, 45, CW2, 15, lbl,
+                              clr=53, align="horiz. centered")
+            writer.write_text(CX0 + c * CW, 60, CW2, 15, f"col {c + 1}",
+                              clr=CLR_BLACK, align="horiz. centered")
+
+        # Outer composite wrapper
+        writer.lines.append('composite {')
+        writer.lines.append('  "composite name" = "matrix"')
+        writer.lines.append('  object {')
+        writer.lines.append(f'    x = {CX0} ')
+        writer.lines.append(f'    y = {RY0}')
+        writer.lines.append(f'    height = {n_rows * RH}')
+        writer.lines.append(f'    width  = {n_cols * CW}')
+        writer.lines.append('  }')
+        writer.lines.append('  children {')
+
+        # Matrix cells
+        for r in range(1, n_rows + 1):
+            cy = RY0 + (r - 1) * RH
+            for c in range(1, n_cols + 1):
+                cx = CX0 + (c - 1) * CW
+                channel = f"{chan_prefix}_{r}_{c}_GAIN"
+                btn_label = f"{r}_{c}"
+                btn_path = os.path.join(
+                    subscreen_dir,
+                    f"{self.prefix}_{block.name}_{r}_{c}.adl")
+                writer.write_matrix_cell(cx, cy, CW2, CH,
+                                         channel, btn_label, btn_path)
+
+        writer.lines.append('    }')
+        writer.lines.append('}')
+
+        # Row labels (signal name + row number)
+        for r, lbl in enumerate(row_labels):
+            ry = RY0 + r * RH + 15
+            writer.write_text(2, ry, 75, 15, lbl,
+                              clr=53, align="horiz. right")
+            writer.write_text(2, ry + 15, 75, 12, f"row {r + 1}",
+                              clr=CLR_BLACK, align="horiz. right")
+
+        with open(filepath, 'w') as f:
+            f.write(writer.get_text())
+        self.generated_files.append(filepath)
+        print(f"  Generated: {filepath}")
+        return filepath
 
     def _get_port_position(self, block, port_num, is_output, tx, ty):
         """Calculate screen position for a port on a block."""
