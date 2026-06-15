@@ -1,0 +1,7 @@
+# Y1:AUX BURT request file — operator-settable channels to snapshot/restore
+# Intentionally excludes safety-critical laser on/off controls (UVD_LASER_ON, UVD_TURN_OFF)
+# which must always revert to safe defaults on restart.
+Y1:AUX-ISS_X_CAL
+Y1:AUX-ISS_X_SETPOINT_MW
+Y1:AUX-ISS_Z_CAL
+Y1:AUX-ISS_Z_SETPOINT_MW
