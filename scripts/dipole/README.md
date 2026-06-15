@@ -25,14 +25,15 @@ conda env (used by the analysis pipeline) has `dttxml` but **not** `nds2`/`pytes
 ## `measure_actuator_gain.py`
 
 ### What it does
-Drives all four electrodes (`Y1:DMD-POLES_E{1..4}_EXC`) **simultaneously**, each at
-several **distinct** sine tones clustered around the X/Y/Z resonances (dense near
-X≈39 / Y≈54 Hz, sparse near Z≈5 Hz). `diag` is used to **inject** the comb (its
-injection is exact); we then capture the raw `PARTICLE_X/Y/Z_IN1` + `POLES_E*_EXC`
-channels over **NDS2** and compute the transfer functions + coherence **ourselves**
-(`TF = S_ER/S_EE`, coherence from Welch averaging). We do NOT use diag's SineResponse
-*coefficient* output — it is unreliable for a multi-tone comb in dtt 4.1.x (see
-"How diag works" below); diag's result XML is still saved for diaggui/archiving.
+Drives all four electrodes **simultaneously**, each at several **distinct** sine tones
+clustered around the X/Y/Z resonances (dense near X≈39 / Y≈54 Hz, sparse near Z≈5 Hz).
+Each tone is assigned to its own **distinct physical excitation channel** (`ACTS_N_M_EXC`,
+one per tone), which makes diag's SineResponse `sizeA == sizeExc` — enabling its native
+per-tone coefficient extraction. We additionally capture the raw `PARTICLE_X/Y/Z_IN1` +
+`ACTS_N_M_EXC` channels over **NDS2** and compute the transfer functions + coherence
+**ourselves** (`TF = S_ER/S_EE`, coherence from Welch averaging) as the primary analysis
+path (validated: 0.500 flat at every tone, coherence 1.0). diag's result XML is still
+saved for diaggui/archiving.
 Frequency-division multiplexing means each tone is owned by one electrode, so the TF
 at that tone is that electrode's coupling into each DOF. Because all electrodes drive
 the *same* mechanical mode per DOF, the common plant `H_d(f)` is fit (Lorentzian
@@ -58,8 +59,10 @@ measure_actuator_gain.py <config.yml> [--dry-run] [--premeasure-only] [--label N
 ### Pipeline / control flow
 1. Generate the tone plan (guard-band-clean, bin-snapped, distinct; every electrode
    driven near every DOF) and Schroeder-phase each electrode's tones.
-2. Snapshot all POLES_E settings; **turn off each module's input switch** (open-loop:
-   only the `_EXC` test point drives the DAC).
+2. Assign each tone to its own `ACTS_{row}_{col}_EXC` channel (`assign_acts_channels`):
+   one column per tone, row = electrode. Snapshot all ACTS element settings; set
+   GAIN=1, input switch OFF (blocks ACTS row input; EXC bypasses it), output switch ON
+   (EXC must exit the element). Also snapshot POLES_E* and turn off their input switches.
 3. Start the NDS2 trap-loss guard; record a 10–20 Hz band-RMS baseline.
 4. Adaptive trim loop (**time-first, then amplitude**): short pre-measurement
    (diag injects, we capture raw NDS2 + compute TFs/coherence) → lengthen the capture
@@ -67,7 +70,7 @@ measure_actuator_gain.py <config.yml> [--dry-run] [--premeasure-only] [--label N
    up to the DAC cap → repeat until X/Y coherence meets target.
 5. Final full measurement (inject + capture + compute) → fit plant + gains → write
    HDF5 + report (and diag's result XML alongside).
-6. `finally`: ramp excitation to zero, restore all POLES settings (idempotent).
+6. `finally`: ramp excitation to zero, restore all POLES and ACTS settings (idempotent).
 
 ### Safety (read before running on a real particle)
 - **Trap-loss guard**: background NDS2 monitor of the **10–20 Hz** band-RMS of
@@ -75,6 +78,9 @@ measure_actuator_gain.py <config.yml> [--dry-run] [--premeasure-only] [--label N
   + ramp to zero. (z-mode harmonics live at ~10–15 Hz and dominate trap loss.)
 - **No excitation tone is ever placed in 10–20 Hz** — a tone there would both
   endanger the trap and pollute the guard (false aborts). Enforced + unit-tested.
+  Z tones can be placed *above* the guard band by setting `dofs.z.f0` above
+  `guard_band_hz[1]` (e.g. `f0: 25.0`); the frequency plan pushes tones away from the
+  guard in both directions and will not pull them back in.
 - **Manual abort**: Ctrl-C / SIGTERM, OR `abort_actuator_gain.sh` (touches the
   sentinel file the script polls each loop). Wire the latter to a red MEDM
   "shell command" button (see the script header for the `.adl` snippet).
@@ -131,24 +137,37 @@ them via NDS2/diag (the guard monitor streams them over NDS2). Slow monitors
     A tiny first value gives coarse FFT bins. (The user's scratch template "0.1 10"
     = 0.1 s / 10 cycles; a real comb used "10 300".)
   - `SettlingTime` is a RELATIVE fraction of the measurement time, not seconds.
-- **DO NOT trust diag's multi-tone coefficient output.** In dtt 4.1.x the SineResponse
-  per-tone *excitation* normalization (`sineAnalyze` on the drive channel, divides by
-  the diagonal self-term in `sineresponse.cc`) returns wrong amplitudes for most tones
-  of a comb — coefficients come back as raw response (≈amp×gain) or NaN, with wrong
-  phase. **The captured DATA is perfect** (raw NDS2 of the comb: excitation = commanded
-  amplitude and response = gain×amplitude at *every* tone). So inject with diag, then
-  **compute TFs ourselves from raw NDS2**:
-  ```python
-  # capture PARTICLE_*_IN1 + POLES_E*_EXC over NDS2 during the injection, then:
-  f, Pee = scipy.signal.csd(exc, exc, fs=fs, nperseg=int(seg_s*fs))
-  _, Per = scipy.signal.csd(exc, resp, fs=fs, nperseg=int(seg_s*fs))
-  _, Prr = scipy.signal.csd(resp, resp, fs=fs, nperseg=int(seg_s*fs))
-  TF  = Per[i]/Pee[i]                                   # response/excitation at tone i
-  coh = abs(Per[i])**2 / (abs(Pee[i])*abs(Prr[i]))      # 0..1
-  ```
-  (`dttxml.DiagAccess(xml).sine_response([chans], freq_idx=k)` → `.FHz`,
-  `.coeffs_dict`, `.cohs_dict` still parses the result XML if you want it, but its
-  multi-tone coefficients are unreliable per above.)
+- **Number of tones is not limited by `MAX_NUM_AWG`.** That constant (= 9) limits the
+  number of distinct excitation *channels* simultaneously active per DCU, not the number
+  of stimulus rows. With 4 POLES_E*_EXC channels we occupy 4 AWG slots regardless of
+  how many rows repeat those channels. `MAX_NUM_AWG_COMPONENTS` (= 5000 per slot) is the
+  practical ceiling per channel — well above any realistic tone count. So `n_tones` in
+  the config can be increased freely.
+- **`analysis.n_averages`** controls the NDS2 capture window for the Welch analysis:
+  `capture_s = n_averages × segment_s`. Set `n_averages` (integer) *or*
+  `measure_capture_s` (seconds), not both. `premeasure_n_averages` / `premeasure_capture_s`
+  work the same way for the trim pre-measurement. The trim loop scales `capture_s` by
+  1.8× each time-first iteration, so effective averages grow with each trim step.
+- **`StimulusReadback` is required for correct multi-tone coefficients** (source-confirmed
+  from `sineresponse.cc` / `stdtest.cc` in dtt 4.1.4; set it in `build_sine_response_xml`).
+  The coefficient normalization loop in `sineresponse.cc` divides each channel's response
+  by `tmp.coeff[a*(sizeA+sizeB)+a]` — the "excitation diagonal" for stimulus `a`. Without
+  `StimulusReadback`, that diagonal is populated by an analytic `ampl*exp(i*2π*f*t)` which
+  is placed at `resultnum=a` only if `sizeA=sizeExc`. With multiple tones on one channel,
+  `sizeA=1` (duplicate flag collapses repeated channels), so `a=1,2,3` index into
+  measurement-channel columns → garbage. With `StimulusReadback=<exc_channel>`, diag runs
+  `sineAnalyze` on the actual measured excitation at each tone frequency and places it at
+  the correct diagonal. Requires **one distinct physical excitation channel per stimulus
+  row** — exactly what the real 4-electrode measurement provides (sizeA=4, sizeB=3).
+  - Single-channel loopback (`ACTS_8_8_EXC` reused 4×): still broken (sizeA=1, all
+    duplicates). Use the **NDS2 workaround** (`compute_tfs`) for loopback validation.
+  - Real 4-electrode measurement: readback should fix it. **Not yet tested on hardware.**
+  - NDS2 workaround (`compute_tfs`, `inject_and_capture`) works for both cases and is
+    the primary analysis path (verified: 0.500 flat, coherence 1.0 on loopback).
+  - **ACTS workaround**: assign one distinct `ACTS_{row}_{col}_EXC` channel per tone so
+    `sizeA == sizeExc` — diag's native extraction should then work. EXC goes through
+    GAIN (confirmed), so setup sets GAIN=1 and output switch ON for each element used.
+    Loopback test uses ACTS_8_1..8_4_EXC (not 8_8 alone) to validate this path.
 - **DAC**: 16-bit signed, ±32768 counts; practical safe clip ~32000
   (`amplitude.max_amplitude_counts`). No software limit was found textually in
   `y1dmd.mdl`; the real per-tone safe level is far below clip and is found by the
@@ -165,7 +184,9 @@ All confirmed against the live FE (June 2026):
    correctly (raw excitation = commanded amplitude at every tone).
 3. ✅ our NDS2-capture + `csd`-based TF/coherence gives the loopback gain **0.500 flat**
    at every tone, coherence 1.0.
-4. ⚠️ diag's own multi-tone *coefficient* output is unreliable — not used (see above).
+4. ⚠️ diag's own multi-tone *coefficient* output was unreliable in the single-channel
+   config (sizeA=1); the ACTS distinct-channel approach (sizeA==sizeExc) should fix
+   this — **pending hardware validation on ACTS_8_1..8_4** (new loopback test).
 5. (manual, operator) the guard trips + ramps to zero on a growing 10–20 Hz inject.
 
 Re-run with `ACTGAIN_LOOPBACK=1 ... -m pytest -m loopback` after any change to the
@@ -181,9 +202,12 @@ ACTGAIN_LOOPBACK=1 /var/lib/cds-conda/base/envs/cds-testing/bin/python3 -m pytes
 ```
 The pure-logic suite covers the frequency plan (guard-band exclusion, distinctness,
 density, snapping), Schroeder crest-factor reduction, diag-XML round-trip,
-`compute_tfs` (recovers known TFs + coherence from synthetic captured data), the
+`compute_tfs` (recovers known TFs + coherence + **phase** from synthetic captured data,
+coherence scaling with number of Welch averages, `n_averages` config resolution), the
 plant+gain fit (recovers known gains from synthetic data), the guard band-RMS math,
 and POLES snapshot/restore + amplitude clamping (mocked EPICS).
+The loopback hardware suite additionally validates phase recovery and coherence-vs-averages
+on the live FE.
 
 ## dtt version note
 The installed dtt is `4.1.5~rc1` from the `bullseye-unstable` apt channel (stable

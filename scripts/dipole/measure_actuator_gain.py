@@ -356,6 +356,122 @@ def restore_poles(cfg: dict, snap: dict, dry_run: bool) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# ACTS snapshot / setup / restore
+# --------------------------------------------------------------------------- #
+def snapshot_acts(cfg: dict, excl: list[str]) -> dict:
+    """Snapshot GAIN/OFFSET/TRAMP/SW1R/SW2R for ACTS elements from their EXC channels.
+
+    excl: list of _EXC channel names, e.g. ['Y1:DMD-ACTS_8_1_EXC', ...]
+    Returns dict keyed by EXC channel name.
+    """
+    pvs = []
+    for exc in excl:
+        base = exc[:-4]  # strip _EXC
+        pvs += [f"{base}_GAIN", f"{base}_OFFSET", f"{base}_TRAMP",
+                f"{base}_SW1R", f"{base}_SW2R"]
+    raw = caget_batch(pvs)
+    snap = {}
+    sw1_bit = cfg["safety"]["sw1_input_on_bit"]
+    sw2_bit = cfg["safety"]["sw2_output_on_bit"]
+    for exc in excl:
+        base = exc[:-4]
+        sw1r = raw.get(f"{base}_SW1R")
+        sw2r = raw.get(f"{base}_SW2R")
+        snap[exc] = {
+            "gain": raw.get(f"{base}_GAIN"),
+            "offset": raw.get(f"{base}_OFFSET"),
+            "tramp": raw.get(f"{base}_TRAMP"),
+            "sw1r": sw1r,
+            "sw2r": sw2r,
+            "input_on": (sw1r is not None) and bool(int(sw1r) & sw1_bit),
+            "output_on": (sw2r is not None) and bool(int(sw2r) & sw2_bit),
+        }
+    return snap
+
+
+def setup_acts_for_measurement(cfg: dict, excl: list[str], snap: dict,
+                                dry_run: bool) -> None:
+    """Prepare ACTS elements: GAIN=1, input switch OFF, output switch ON.
+
+    EXC goes through GAIN (confirmed), so GAIN=1 is required. Input switch OFF
+    blocks normal ACTS inputs while EXC still bypasses it. Output switch ON
+    ensures the EXC contribution passes to the row sum (output switch gates EXC).
+    """
+    sw1_bit = cfg["safety"]["sw1_input_on_bit"]
+    sw2_bit = cfg["safety"]["sw2_output_on_bit"]
+    for exc in excl:
+        base = exc[:-4]
+        s = snap[exc]
+        if dry_run:
+            print(f"  DRY-RUN: {base}: GAIN=1 (was {s['gain']}), "
+                  f"input {'OFF->OFF' if not s['input_on'] else 'ON->OFF'}, "
+                  f"output {'ON->ON' if s['output_on'] else 'OFF->ON'}")
+            continue
+        if s["gain"] != 1.0:
+            caput(f"{base}_GAIN", 1)
+        if s["input_on"]:
+            caput(f"{base}_SW1", sw1_bit)      # XOR-toggle → turn input OFF
+        if not s["output_on"]:
+            caput(f"{base}_SW2", sw2_bit)      # XOR-toggle → turn output ON
+
+
+def restore_acts(cfg: dict, excl: list[str], snap: dict, dry_run: bool) -> None:
+    """Restore ACTS elements to their pre-measurement state (idempotent)."""
+    sw1_bit = cfg["safety"]["sw1_input_on_bit"]
+    sw2_bit = cfg["safety"]["sw2_output_on_bit"]
+    tramp = cfg["safety"].get("restore_tramp_s", 2.0)
+    for exc in excl:
+        base = exc[:-4]
+        s = snap[exc]
+        if dry_run:
+            print(f"  DRY-RUN: restore {base}: GAIN={s['gain']} "
+                  f"input_on={s['input_on']} output_on={s['output_on']}")
+            continue
+        if s["tramp"] is not None:
+            caput(f"{base}_TRAMP", tramp)
+        if s["offset"] is not None:
+            caput(f"{base}_OFFSET", s["offset"])
+        if s["gain"] is not None:
+            caput(f"{base}_GAIN", s["gain"])
+        cur = caget_batch([f"{base}_SW1R"]).get(f"{base}_SW1R")
+        cur_in = (cur is not None) and bool(int(cur) & sw1_bit)
+        if s["input_on"] and not cur_in:
+            caput(f"{base}_SW1", sw1_bit)      # XOR-toggle → turn back ON
+        cur2 = caget_batch([f"{base}_SW2R"]).get(f"{base}_SW2R")
+        cur_out = (cur2 is not None) and bool(int(cur2) & sw2_bit)
+        if not s["output_on"] and cur_out:
+            caput(f"{base}_SW2", sw2_bit)      # XOR-toggle → turn back OFF
+        if s["tramp"] is not None:
+            caput(f"{base}_TRAMP", s["tramp"])
+
+
+def assign_acts_channels(tones: list[Tone], cfg: dict) -> None:
+    """Assign one distinct ACTS EXC channel per tone (in place).
+
+    Groups tones by electrode, looks up ACTS row from cfg["acts"]["electrode_row"],
+    assigns columns 1..N sequentially. Sets tone.channel so that each tone has its
+    own distinct physical excitation channel — this makes sizeA == sizeExc in diag's
+    SineResponse, enabling its native per-tone coefficient extraction.
+    Raises ValueError if more than 8 tones per electrode (only 8 ACTS columns per row).
+    """
+    prefix = cfg["prefix"]
+    elec_row = cfg["acts"]["electrode_row"]
+    by_elec: dict[str, list[Tone]] = {}
+    for t in tones:
+        by_elec.setdefault(t.electrode, []).append(t)
+    for elec, ts in by_elec.items():
+        if elec not in elec_row:
+            raise ValueError(f"Electrode '{elec}' not in acts.electrode_row config")
+        row = int(elec_row[elec])
+        if len(ts) > 8:
+            raise ValueError(
+                f"Electrode {elec} (ACTS row {row}) has {len(ts)} tones but ACTS "
+                f"only has 8 columns per row; reduce n_tones for this DOF")
+        for col, t in enumerate(ts, start=1):
+            t.channel = f"{prefix}-ACTS_{row}_{col}_EXC"
+
+
+# --------------------------------------------------------------------------- #
 # Trap-loss guard monitor (NDS2 stream + 10-20 Hz band RMS)
 # --------------------------------------------------------------------------- #
 def band_rms(x: np.ndarray, fs: float, band: tuple[float, float]) -> float:
@@ -459,6 +575,28 @@ def build_sine_response_xml(cfg: dict, tones: list[Tone], meas: dict,
     lines.append(P("Creator", "string", "measure_actuator_gain.py"))
     lines.append(P("TestType", "string", "SineResponse"))
     lines.append('  </LIGO_LW>')
+    # Def block is required: without it diaggui defaults NoStimulus=true ->
+    # "Unable to turn on excitations; Unable to start test".
+    lines.append('  <LIGO_LW Name="Def" Type="Defaults">')
+    lines.append(P("Flag", "string", "TestParameters"))
+    lines.append(P("AllowCancel", "boolean", "true"))
+    lines.append(P("NoStimulus", "boolean", "false"))
+    lines.append(P("NoAnalysis", "boolean", "false"))
+    lines.append(P("KeepTraces", "int", "100"))
+    lines.append(P("SiteDefault", "byte", "."))
+    lines.append(P("SiteForce", "byte", " "))
+    lines.append(P("IfoDefault", "byte", " "))
+    lines.append(P("IfoForce", "byte", " "))
+    lines.append('  </LIGO_LW>')
+    lines.append('  <LIGO_LW Name="Sync" Type="Synchronization">')
+    lines.append(P("Flag", "string", "TestParameters"))
+    lines.append(P("Type", "int", "0"))
+    lines.append('    <Time Name="Start" Type="GPS">0</Time>')
+    lines.append(P("Wait", "double", "-0", ' Unit="s"'))
+    lines.append(P("Repeat", "int", "1"))
+    lines.append(P("RepeatRate", "double", "0", ' Unit="s"'))
+    lines.append(P("SlowDown", "double", "0", ' Unit="s"'))
+    lines.append('  </LIGO_LW>')
     lines.append('  <LIGO_LW Name="Test" Type="TestParameter">')
     lines.append(P("Flag", "string", "TestParameters"))
     lines.append(P("Subtype", "string", "SineResponse"))
@@ -493,7 +631,15 @@ def build_sine_response_xml(cfg: dict, tones: list[Tone], meas: dict,
         ch = t.channel or f"{prefix}-POLES_{t.electrode}_EXC"
         lines.append(P(f"StimulusChannel[{i}]", "string", ch, ' Unit="channel"'))
         lines.append(P(f"StimulusActive[{i}]", "boolean", "true"))
-        lines.append(P(f"StimulusReadback[{i}]", "string", "", ' Unit="channel"'))
+        # StimulusReadback non-empty -> isReadback=true: diag calls sineAnalyze on
+        # the actual excitation channel at each tone's frequency.
+        # NOTE: this only fully fixes the normalization when sizeExc==sizeA (one
+        # distinct channel per tone). With multiple tones per electrode (the real
+        # measurement), sizeA=4 but sizeExc=~20; diag's normalization loop still
+        # indexes out of the excitation zone for tones 4+. The NDS2 workaround
+        # (inject_and_capture + compute_tfs) is the robust path for both cases.
+        # Keeping readback set is still correct and harmless. (sineresponse.cc.)
+        lines.append(P(f"StimulusReadback[{i}]", "string", ch, ' Unit="channel"'))
     lines.append('  </LIGO_LW>')
     lines.append('</LIGO_LW>')
     return "\n".join(lines) + "\n"
@@ -837,6 +983,26 @@ def _check_aborts(abort_event: threading.Event, sentinel: Path):
         raise AbortRequested(f"sentinel file present: {sentinel}")
 
 
+def _resolve_capture_s(acfg: dict, key_n: str, key_s: str) -> float:
+    """Resolve NDS2 capture duration from either an averages count or an explicit seconds value.
+
+    Set exactly one of ``key_n`` (integer number of Welch averages) or ``key_s`` (explicit
+    seconds) in ``acfg``; setting both raises ValueError. ``key_n`` is multiplied by
+    ``acfg["segment_s"]`` to yield the window length.
+    """
+    has_n = key_n in acfg
+    has_s = key_s in acfg
+    if has_n and has_s:
+        raise ValueError(
+            f"analysis config: set exactly one of '{key_n}' or '{key_s}', not both")
+    if has_n:
+        return float(acfg[key_n]) * float(acfg["segment_s"])
+    if has_s:
+        return float(acfg[key_s])
+    raise ValueError(
+        f"analysis config: missing '{key_n}' or '{key_s}' — set one of them")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -874,9 +1040,9 @@ def main() -> None:
     # tone lands cleanly on a bin in our own spectral analysis.
     bin_hz = 1.0 / float(cfg["analysis"]["segment_s"])
     premeasure = dict(cfg["diag"]["premeasure"])
-    premeasure["capture_s"] = cfg["analysis"]["premeasure_capture_s"]
+    premeasure["capture_s"] = _resolve_capture_s(cfg["analysis"], "premeasure_n_averages", "premeasure_capture_s")
     measure = dict(cfg["diag"]["measure"])
-    measure["capture_s"] = cfg["analysis"]["measure_capture_s"]
+    measure["capture_s"] = _resolve_capture_s(cfg["analysis"], "n_averages", "measure_capture_s")
 
     tones = generate_frequency_plan(cfg, bin_hz)
     init_amp = cfg["amplitude"]["initial_amplitude_counts"]
@@ -885,10 +1051,20 @@ def main() -> None:
     if cfg["schroeder"].get("enabled", True):
         assign_schroeder_phases(tones)
 
+    # Assign one distinct ACTS EXC channel per tone when acts mode is enabled.
+    # This makes sizeA == sizeExc in diag's SineResponse so its native per-tone
+    # coefficient extraction works correctly. Falls back to POLES_E*_EXC otherwise.
+    acts_enabled = bool(cfg.get("acts", {}).get("enabled", False))
+    if acts_enabled:
+        assign_acts_channels(tones, cfg)
+    exc_channels = list({t.channel or f"{cfg['prefix']}-POLES_{t.electrode}_EXC"
+                         for t in tones})
+
     sentinel = Path(cfg["abort"]["sentinel_path"])
     run_dir = _make_run_dir(cfg, args.label)
     print(f"Output directory: {run_dir}")
     print(f"Analysis FFT bin: {bin_hz:.4f} Hz   tones: {len(tones)}")
+    print(f"Excitation: {'ACTS EXC (one channel/tone)' if acts_enabled else 'POLES EXC'}")
     _print_plan(tones, electrodes)
 
     if args.dry_run:
@@ -922,6 +1098,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _sig_handler)
 
     snap = snapshot_poles(cfg)
+    acts_snap = snapshot_acts(cfg, exc_channels) if acts_enabled else {}
     guard = GuardMonitor(cfg, abort_event)
     restored = [False]
     diag_proc_holder: list = []
@@ -932,11 +1109,15 @@ def main() -> None:
             print("Restoring POLES state and ensuring excitation is zero...")
             try:
                 restore_poles(cfg, snap, dry_run=False)
+                if acts_enabled:
+                    restore_acts(cfg, exc_channels, acts_snap, dry_run=False)
             finally:
                 restored[0] = True
 
     try:
         disable_poles_inputs(cfg, snap, dry_run=False)
+        if acts_enabled:
+            setup_acts_for_measurement(cfg, exc_channels, acts_snap, dry_run=False)
         guard.start()
         print(f"Guard monitor: measuring {guard.baseline_seconds}s baseline "
               f"in {guard.band[0]}-{guard.band[1]} Hz...")

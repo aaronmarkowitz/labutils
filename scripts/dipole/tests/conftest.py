@@ -62,6 +62,9 @@ guard_monitor:
   baseline_seconds: 5
   poll_seconds: 1
 safety: {poles_assume_open_loop: true, sw1_input_on_bit: 4, sw2_output_on_bit: 1024, restore_tramp_s: 2.0}
+acts:
+  enabled: true
+  electrode_row: {E1: 1, E2: 2, E3: 3, E4: 4}
 abort: {sentinel_path: "/tmp/abort_actuator_gain_test"}
 output_root: "/tmp/actgain_test_out"
 run_label: "actgain"

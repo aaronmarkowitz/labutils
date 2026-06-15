@@ -114,3 +114,132 @@ def test_analyze_and_write_writes_files(base_cfg, synthetic_records, tmp_path):
     assert gm.shape == (3, 4)
     assert (tmp_path / "actuator_gain_results.h5").exists()
     assert (tmp_path / "actuator_gain_report.txt").exists()
+
+
+def test_compute_tfs_recovers_phase(base_cfg):
+    """compute_tfs recovers the correct complex phase, not just magnitude."""
+    fs, dur = 1024.0, 16.0
+    base_cfg["analysis"]["segment_s"] = 2.0
+    base_cfg["dofs"]["x"]["channel"] = "Y1:DMD-PARTICLE_X_IN1"
+    base_cfg["dofs"]["y"]["channel"] = "Y1:DMD-PARTICLE_Y_IN1"
+    base_cfg["dofs"]["z"]["channel"] = "Y1:DMD-PARTICLE_Z_IN1"
+
+    f = 13.0   # on a 0.5 Hz bin
+    tone = mag.Tone(freq=f, electrode="E1", dof="x", amp_counts=500.0, phase_rad=0.0)
+    response_phase = -np.pi / 2   # 90 degrees lagging
+
+    t = np.arange(int(fs * dur)) / fs
+    exc_sig = 500.0 * np.cos(2 * np.pi * f * t)
+    resp_sig = 0.5 * 500.0 * np.cos(2 * np.pi * f * t + response_phase)
+    captured = {
+        "Y1:DMD-POLES_E1_EXC": exc_sig,
+        "Y1:DMD-PARTICLE_X_IN1": resp_sig,
+        "Y1:DMD-PARTICLE_Y_IN1": np.zeros_like(t),
+        "Y1:DMD-PARTICLE_Z_IN1": np.zeros_like(t),
+    }
+    records = mag.compute_tfs(captured, fs, [tone], base_cfg)
+    rec = records[0]
+    assert abs(abs(rec["tf"]["x"]) - 0.5) < 1e-3, f"magnitude wrong: {abs(rec['tf']['x'])}"
+    angle = np.angle(rec["tf"]["x"])
+    assert abs(angle - response_phase) < 0.05, f"phase wrong: {angle:.4f} rad (expected {response_phase:.4f})"
+    assert rec["coh"]["x"] > 0.99
+
+
+def test_noise_coherence_decreases_with_more_averages(base_cfg):
+    """The Welch MSC estimator has a positive bias for few averages that shrinks with K.
+
+    For a purely incoherent channel (true γ² = 0), more averages gives a lower and more
+    accurate coherence estimate (converging toward 0). This tests that compute_tfs is
+    correctly averaging the cross-spectra rather than returning the single-segment estimate.
+
+    Note: for a coherent signal (true γ² ≈ 1) both K=2 and K=32 give ≈ 1.0, so the effect
+    is only visible on incoherent or weakly coherent channels.
+    """
+    fs = 1024.0
+    f = 13.0
+    rng = np.random.default_rng(42)
+    base_cfg["analysis"]["segment_s"] = 2.0
+    base_cfg["dofs"]["x"]["channel"] = "Y1:DMD-PARTICLE_X_IN1"
+    base_cfg["dofs"]["y"]["channel"] = "Y1:DMD-PARTICLE_Y_IN1"
+    base_cfg["dofs"]["z"]["channel"] = "Y1:DMD-PARTICLE_Z_IN1"
+    tone = mag.Tone(freq=f, electrode="E1", dof="x", amp_counts=500.0)
+
+    def _make_captured(dur):
+        n = int(fs * dur)
+        t = np.arange(n) / fs
+        exc = 500.0 * np.cos(2 * np.pi * f * t)
+        return {
+            "Y1:DMD-POLES_E1_EXC": exc,
+            "Y1:DMD-PARTICLE_X_IN1": 0.5 * exc,   # perfectly coherent
+            "Y1:DMD-PARTICLE_Y_IN1": rng.normal(0, 500, n),   # pure noise: true γ² = 0
+            "Y1:DMD-PARTICLE_Z_IN1": np.zeros(n),
+        }
+
+    cap_short = _make_captured(4.0)    # ~2 Welch averages (with 50% overlap: ~3)
+    cap_long  = _make_captured(64.0)   # ~32 Welch averages (with 50% overlap: ~63)
+
+    rec_short = mag.compute_tfs(cap_short, fs, [tone], base_cfg)[0]
+    rec_long  = mag.compute_tfs(cap_long,  fs, [tone], base_cfg)[0]
+
+    # Coherent X channel: both converge to ~1.0 regardless of K
+    assert rec_short["coh"]["x"] > 0.99
+    assert rec_long["coh"]["x"] > 0.99
+
+    # Incoherent Y channel: positive bias shrinks with K → coh_short > coh_long
+    coh_y_short = rec_short["coh"]["y"]
+    coh_y_long  = rec_long["coh"]["y"]
+    assert coh_y_short > coh_y_long, (
+        f"noise-channel coherence bias should decrease with more averages: "
+        f"short={coh_y_short:.3f} long={coh_y_long:.3f}")
+    assert coh_y_long < 0.1, f"well-averaged noise channel should be near 0: {coh_y_long:.3f}"
+
+
+def test_raw_capture_roundtrip_preserves_phase(base_cfg, tmp_path):
+    """save_raw_capture → load_raw_capture preserves complex phase through compute_tfs."""
+    import yaml
+    fs, dur = 1024.0, 16.0
+    base_cfg["analysis"]["segment_s"] = 2.0
+    for d in ("x", "y", "z"):
+        base_cfg["dofs"][d]["channel"] = f"Y1:DMD-PARTICLE_{d.upper()}_IN1"
+
+    f = 13.0
+    phase = np.pi / 3   # 60 degrees
+    gain  = 0.5
+    tone = mag.Tone(freq=f, electrode="E1", dof="x", amp_counts=500.0)
+    t = np.arange(int(fs * dur)) / fs
+    exc  = 500.0 * np.cos(2 * np.pi * f * t)
+    # response = gain * cos(2π f t + phase)  => TF = gain * exp(i*phase)
+    resp = gain * 500.0 * np.cos(2 * np.pi * f * t + phase)
+    captured = {
+        "Y1:DMD-POLES_E1_EXC": exc,
+        "Y1:DMD-PARTICLE_X_IN1": resp,
+        "Y1:DMD-PARTICLE_Y_IN1": np.zeros_like(t),
+        "Y1:DMD-PARTICLE_Z_IN1": np.zeros_like(t),
+    }
+    p = mag.save_raw_capture(tmp_path, captured, fs, [tone], yaml.safe_dump(base_cfg))
+    cap2, fs2, tones2, _ = mag.load_raw_capture(p)
+    records = mag.compute_tfs(cap2, fs2, tones2, base_cfg)
+    rec = records[0]
+    assert abs(abs(rec["tf"]["x"]) - gain) < 1e-3, f"magnitude wrong: {abs(rec['tf']['x'])}"
+    angle = np.angle(rec["tf"]["x"])
+    assert abs(angle - phase) < 0.05, f"phase not preserved through roundtrip: {angle:.4f} vs {phase:.4f}"
+
+
+def test_resolve_capture_s_n_averages():
+    """_resolve_capture_s converts n_averages * segment_s correctly."""
+    acfg = {"segment_s": 2.0, "n_averages": 10}
+    assert mag._resolve_capture_s(acfg, "n_averages", "measure_capture_s") == 20.0
+
+
+def test_resolve_capture_s_explicit_seconds():
+    """_resolve_capture_s passes through an explicit capture_s value."""
+    acfg = {"segment_s": 2.0, "measure_capture_s": 18.0}
+    assert mag._resolve_capture_s(acfg, "n_averages", "measure_capture_s") == 18.0
+
+
+def test_resolve_capture_s_mutual_exclusion():
+    """_resolve_capture_s raises if both keys are present."""
+    import pytest
+    acfg = {"segment_s": 2.0, "n_averages": 10, "measure_capture_s": 20.0}
+    with pytest.raises(ValueError, match="exactly one"):
+        mag._resolve_capture_s(acfg, "n_averages", "measure_capture_s")

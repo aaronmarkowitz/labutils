@@ -15,24 +15,32 @@ electrodes: ["E1", "E2", "E3", "E4"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation ro
 #   every resonance (each electrode-DOF coupling is measured every run).
 #   fit_plant: true  -> jointly fit f0/Q + per-electrode gains (needs n_tones > 4)
 #   fit_plant: false -> fix f0/Q at the seed, fit only the gains (use for Z)
+#
+#   More tones: MAX_NUM_AWG=9 limits DISTINCT excitation channels, not stimulus
+#   rows. With 4 POLES channels we occupy 4 AWG slots regardless of n_tones, so
+#   n_tones can be increased freely. The NDS2 analysis path handles any count.
+#
+#   Z placement: set dofs.z.f0 above guard_band_hz[1] (e.g. f0: 25.0) to place
+#   Z tones above the guard band entirely. The frequency plan pushes tones away
+#   from the guard band in both directions — tones seeded above 20 Hz stay above.
 dofs:
   x:
     channel: "Y1:DMD-PARTICLE_X_IN1"
     f0: 39.0
     Q: 30.0
-    n_tones: 6            # DENSE: pins the Lorentzian (some electrodes get 2 tones)
+    n_tones: 8            # 8 tones / 4 electrodes = 2 per electrode; 8+8+4=20 total
     tone_spacing_hz: 1.5
     fit_plant: true
   y:
     channel: "Y1:DMD-PARTICLE_Y_IN1"
     f0: 54.0
     Q: 30.0
-    n_tones: 6            # DENSE
+    n_tones: 8            # same; 4 electrodes each get 5 tones total (2x + 2y + 1z)
     tone_spacing_hz: 1.5
     fit_plant: true
   z:
     channel: "Y1:DMD-PARTICLE_Z_IN1"
-    f0: 5.0
+    f0: 5.0               # change to e.g. 25.0 to place Z tones above the guard band
     Q: 10.0
     n_tones: 4            # SPARSE: one tone per electrode; f0/Q fixed at seed.
     tone_spacing_hz: 0.6  # Z is low-freq: few cycles/time, worst sensor coupling.
@@ -49,9 +57,9 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 32000      # hard cap per tone. DAC is 16-bit signed (+/-32768).
-  initial_amplitude_counts: 1000   # conservative starting drive (per tone)
-  amp_step_factor: 1.7             # multiplicative increase per amplitude trim step
+  max_amplitude_counts: 100         # hard cap per tone. DAC is 16-bit signed (+/-32768).
+  initial_amplitude_counts: 5      # start very conservative; trim loop raises as needed
+  amp_step_factor: 3.0             # multiplicative increase per amplitude trim step
 
 schroeder:
   enabled: true   # phase the tones on each electrode to minimize crest factor
@@ -88,13 +96,16 @@ diag:
 analysis:
   nds2_server: "192.168.1.11"
   nds2_port: 8088
-  segment_s: 2.0       # Welch segment length -> FFT bin = 1/segment_s = 0.5 Hz.
-                       # Tones are snapped to multiples of this bin.
-  premeasure_capture_s: 6.0   # raw capture duration for the short pre-measurement
-  measure_capture_s: 20.0     # raw capture duration for the full measurement
-  warmup_s: 3.0        # wait after diag run starts (settling+rampup) before capturing
-  save_raw_capture: true      # save the final raw NDS2 capture to raw_capture.h5
-                              # (enables `--analyze` re-processing; ~25-40 MB/run)
+  segment_s: 2.0            # Welch segment length -> FFT bin = 1/segment_s = 0.5 Hz.
+                             # Tones are snapped to multiples of this bin.
+  n_averages: 10             # number of Welch segments for the full measurement
+                             # -> capture_s = n_averages * segment_s = 20.0 s.
+                             # Set this OR measure_capture_s (not both).
+  premeasure_n_averages: 3   # same for the short pre-measurement -> 6.0 s
+                             # Set this OR premeasure_capture_s (not both).
+  warmup_s: 3.0              # wait after diag run starts (settling+rampup) before capturing
+  save_raw_capture: true     # save the final raw NDS2 capture to raw_capture.h5
+                             # (enables `--analyze` re-processing; ~25-40 MB/run)
   # diag is driven headless via: diag -l -f <cmdfile>. The post-connect command
   # sequence lives in DIAG_COMMAND_SEQUENCE in measure_actuator_gain.py and is the
   # FIRST thing to verify on the loopback (see README "Verify-first" list).
@@ -107,6 +118,27 @@ guard_monitor:
   factor: 2.0          # abort if band-RMS exceeds factor x baseline on any DOF
   baseline_seconds: 10
   poll_seconds: 1
+
+# ACTS matrix excitation (one distinct EXC channel per tone).
+# When enabled=true, each tone is assigned to ACTS_{row}_{col}_EXC where row
+# maps to an electrode and col increments per tone on that electrode (max 8).
+# This gives diag sizeA==sizeExc, enabling its native per-tone coefficient
+# extraction. EXC goes through GAIN: setup sets GAIN=1, turns input OFF (blocks
+# normal ACTS input; EXC still passes through), turns output ON (required for
+# EXC to reach the row sum). All channels are snapshotted and restored on exit.
+# NOTE: acts.enabled is set to false. The AWG protocol hard-limits simultaneous
+# excitation channels to MAX_NUM_AWG=9 (defined in /usr/include/gds/dtt/awgtype.h),
+# regardless of how many EXC channels the FE model exports. With 4 electrodes x 5
+# tones = 20 tones, the ACTS distinct-channel approach requires 20 AWG slots and
+# fails on channel 10 with ret=-3 (awgSetChannel). The NDS2 path (compute_tfs) is
+# unaffected by this limit and handles all 20 tones correctly.
+acts:
+  enabled: false
+  electrode_row:   # ACTS row number for each electrode label in cfg["electrodes"]
+    E1: 1
+    E2: 2
+    E3: 3
+    E4: 4
 
 safety:
   poles_assume_open_loop: true
