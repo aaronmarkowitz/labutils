@@ -734,6 +734,8 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
 
     Returns (captured: {channel: np.ndarray}, fs: float, result_xml: Path).
     """
+    timeout_s = max(float(cfg["diag"]["diag_timeout_s"]), meas["min_time_s"] + 60)
+
     gen_xml = run_dir / f"gen_{label}.xml"
     gen_xml.write_text(build_sine_response_xml(cfg, tones, meas))
     result_xml = run_dir / f"result_{label}.xml"
@@ -742,7 +744,7 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
 
     def _run():
         try:
-            run_diag_measurement(gen_xml, result_xml, cfg["diag"]["diag_timeout_s"])
+            run_diag_measurement(gen_xml, result_xml, timeout_s)
         except Exception as e:  # noqa: BLE001 - surfaced to caller after join
             diag_err["e"] = e
 
@@ -773,7 +775,7 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
         if n >= n_strides:
             break
 
-    th.join(timeout=cfg["diag"]["diag_timeout_s"])
+    th.join(timeout=timeout_s)
     if diag_err:
         raise diag_err["e"]
     captured = {c: np.concatenate(acc[c]) for c in chans if acc[c]}
@@ -1368,17 +1370,15 @@ def _trim_step(cfg, tones, records, meas, segment_s: float, n_averages: int):
                                      warmup + new_meas["capture_s"] + margin)
         return new_meas, new_seg, changed_amp
 
-    # 2) amplitude: raise under-coherent X/Y electrodes up to the cap
+    # 2) amplitude: raise under-coherent X/Y tones up to the cap
     step = cfg["amplitude"]["amp_step_factor"]
     cap = cfg["amplitude"]["max_amplitude_counts"]
-    by_coh = {}
+    low_tones = set()
     for r in records:
-        if r["dof_intended"] in ("x", "y"):
-            by_coh.setdefault(r["electrode"], 1.0)
-            by_coh[r["electrode"]] = min(by_coh[r["electrode"]], r["coh"][r["dof_intended"]])
-    low_elecs = {e for e, c in by_coh.items() if c < target}
+        if r["dof_intended"] in ("x", "y") and r["coh"][r["dof_intended"]] < target:
+            low_tones.add((r["freq"], r["electrode"]))
     for t in tones:
-        if t.electrode in low_elecs:
+        if (t.freq, t.electrode) in low_tones:
             newamp = min(t.amp_counts * step, cap)
             if newamp > t.amp_counts:
                 t.amp_counts = newamp

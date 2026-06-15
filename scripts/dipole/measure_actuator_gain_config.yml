@@ -123,7 +123,7 @@ guard_monitor:
   band_hz: [10.0, 15.0]
   factor: 10000.0          # abort if band-RMS exceeds factor x baseline on any DOF
   baseline_seconds: 10
-  poll_seconds: 1
+  poll_seconds: 10
 
 # ACTS matrix excitation (one distinct EXC channel per tone).
 # When enabled=true, each tone is assigned to ACTS_{row}_{col}_EXC where row

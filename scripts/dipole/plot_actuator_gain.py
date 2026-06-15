@@ -136,42 +136,41 @@ def _build_bode_figure(
         ax_phase.plot(f_curve, np.degrees(np.angle(curve_vals)), color=color,
                       lw=1.5, zorder=2)
 
-    # ---- scatter: one point per record in records_subset ----
+    # ---- scatter: one point per (record, dof) — colored by measurement channel ----
     for r in records_subset:
         e_idx = electrodes.index(r["electrode"]) if r["electrode"] in electrodes else 0
-        pt_color = _elec_color(e_idx) if show_all_elec_colors else _DOF_COLORS.get(r["dof_intended"], "gray")
         marker = _elec_marker(e_idx)
 
         for dof in ("x", "y", "z"):
+            color = _DOF_COLORS[dof]
             alpha = 1.0 if is_trim else float(np.clip(r["coh"][dof], 0.05, 1.0))
             tf_val = r["tf"][dof]
             ax_amp.scatter(r["freq"], abs(tf_val),
-                           color=pt_color, marker=marker, s=30, alpha=alpha, zorder=3)
+                           color=color, marker=marker, s=30, alpha=alpha, zorder=3)
             ax_phase.scatter(r["freq"], np.degrees(np.angle(tf_val)),
-                             color=pt_color, marker=marker, s=30, alpha=alpha, zorder=3)
-
-    # ---- coherence panel ----
-    for r in records_subset:
-        e_idx = electrodes.index(r["electrode"]) if r["electrode"] in electrodes else 0
-        pt_color = _elec_color(e_idx) if show_all_elec_colors else _DOF_COLORS.get(r["dof_intended"], "gray")
-        marker = _elec_marker(e_idx)
-        for dof in ("x", "y", "z"):
+                             color=color, marker=marker, s=30, alpha=alpha, zorder=3)
             ax_coh.scatter(r["freq"], r["coh"][dof],
-                           color=_DOF_COLORS[dof], marker=marker, s=25, zorder=3)
+                           color=color, marker=marker, s=25, zorder=3)
 
     ax_coh.axhline(0.9, color="gray", ls="--", lw=1.0, label="coh = 0.9")
 
-    # ---- legend: DOF curves on amplitude panel ----
+    # ---- legends ----
     ax_amp.legend(fontsize=7, loc="upper right")
-    # ---- legend: electrode colours on combined figure ----
     if show_all_elec_colors:
-        handles = [
+        elec_handles = [
             plt.Line2D([0], [0], marker=_elec_marker(i), color="w",
-                       markerfacecolor=_elec_color(i), markersize=7,
+                       markerfacecolor="gray", markersize=7,
                        label=electrodes[i] if i < len(electrodes) else f"E{i}")
             for i in range(len(electrodes))
         ]
-        ax_amp.legend(handles=handles, fontsize=7, loc="upper right", title="Electrode")
+        dof_handles = [
+            plt.Line2D([0], [0], marker="o", color="w",
+                       markerfacecolor=_DOF_COLORS[d], markersize=7,
+                       label=d.upper())
+            for d in ("x", "y", "z")
+        ]
+        ax_coh.legend(handles=elec_handles + dof_handles, fontsize=7,
+                      loc="lower right", ncol=2)
 
     # ---- axes formatting ----
     if _should_log_xaxis(all_records):
@@ -185,7 +184,8 @@ def _build_bode_figure(
     ax_coh.set_ylabel("Coherence")
     ax_coh.set_ylim(0, 1.05)
     ax_coh.set_xlabel("Frequency (Hz)")
-    ax_coh.legend(fontsize=7, loc="lower right")
+    if not show_all_elec_colors:
+        ax_coh.legend(fontsize=7, loc="lower right")
 
     fig.suptitle(title, fontsize=11)
     fig.tight_layout()
