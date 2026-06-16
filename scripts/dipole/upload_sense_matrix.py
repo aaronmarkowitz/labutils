@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Upload W matrix from step 01 HDF5 to the Y1:DMD SENSE matrix via EPICS caput.
 
-Reads the demodulation matrix W (3xN) produced by dipole_pipeline step 01
+Reads the demodulation matrix W (KxN) produced by dipole_pipeline step 01
 and writes the corresponding elements to Y1:DMD-SENSE_{row}_{col}_GAIN.
+K is determined from the HDF5 'dofs' attribute (e.g. K=2 for dofs=[x,y]).
 
 Each SENSE element is an rtcds filter module (cdsFiltMuxMatrix). For each
 written element the script also:
@@ -49,32 +50,42 @@ def load_config(config_path: Path) -> dict:
 
 
 def load_hdf5(hdf5_path: Path) -> dict:
-    """Read W, channel_names, and diagnostic metadata from the step 01 HDF5."""
+    """Read W, channel_names, dofs, and diagnostic metadata from the step 01 HDF5."""
     with h5py.File(hdf5_path, "r") as f:
-        W = f["W"][:]  # (3, N)
+        W = f["W"][:]  # (K, N)
         channel_names = json.loads(f.attrs["channel_names"])
-        peak_x = f.attrs.get("peak_frequency_hz_x", float("nan"))
-        peak_y = f.attrs.get("peak_frequency_hz_y", float("nan"))
-        peak_z = f.attrs.get("peak_frequency_hz_z", float("nan"))
-        er_x = f.attrs.get("eigenratio_x", float("nan"))
-        er_y = f.attrs.get("eigenratio_y", float("nan"))
-        er_z = f.attrs.get("eigenratio_z", float("nan"))
+        dofs_raw = f.attrs.get("dofs", None)
+        if dofs_raw is not None:
+            dofs = json.loads(dofs_raw)
+        else:
+            dofs = ["x", "y", "z"][:W.shape[0]]
+        peak_hz = {}
+        eigenratio = {}
+        for m in dofs:
+            peak_hz[m] = f.attrs.get(f"peak_frequency_hz_{m}", float("nan"))
+            eigenratio[m] = f.attrs.get(f"eigenratio_{m}", float("nan"))
     return {
         "W": W,
         "channel_names": channel_names,
-        "peak_hz": {"x": peak_x, "y": peak_y, "z": peak_z},
-        "eigenratio": {"x": er_x, "y": er_y, "z": er_z},
+        "dofs": dofs,
+        "peak_hz": peak_hz,
+        "eigenratio": eigenratio,
     }
 
 
-def build_mapping(hdf5: dict, config: dict) -> list[dict]:
-    """Return list of {base, epics_channel, value, row_label, col_label, mode, ch_name}."""
-    W = hdf5["W"]  # (3, N)
+def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
+    """Return (entries, skipped_rows).
+
+    entries: list of {base, epics_channel, value, row_label, col_label, mode, ch_name}
+    skipped_rows: list of row configs whose mode is not in hdf5["dofs"]
+    """
+    W = hdf5["W"]  # (K, N)
     channel_names = hdf5["channel_names"]
+    dofs = hdf5["dofs"]
     prefix = config["prefix"]
     mat = config["matrix_name"]
 
-    mode_to_row_idx = {"x": 0, "y": 1, "z": 2}
+    mode_to_w_row = {m: i for i, m in enumerate(dofs)}
 
     # Map channel_suffix -> W column index via _IN1 channel name stripping
     # e.g. "Y1:DMD-LESZ_YAW_IN1" -> "LESZ_YAW"
@@ -84,9 +95,13 @@ def build_mapping(hdf5: dict, config: dict) -> list[dict]:
         ch_suffix_to_w_col[stripped] = w_col_idx
 
     entries = []
+    skipped_rows = []
     for row_cfg in config["rows"]:
         mode = row_cfg["mode"]
-        w_row = mode_to_row_idx[mode]
+        if mode not in mode_to_w_row:
+            skipped_rows.append(row_cfg)
+            continue
+        w_row = mode_to_w_row[mode]
         sense_row = row_cfg["index"]
 
         for col_cfg in config["cols"]:
@@ -107,7 +122,7 @@ def build_mapping(hdf5: dict, config: dict) -> list[dict]:
                 "ch_name": channel_names[w_col],
             })
 
-    return entries
+    return entries, skipped_rows
 
 
 def _caget_int(channel: str) -> int | None:
@@ -202,8 +217,10 @@ def write_entry(entry: dict, sw_state: dict, tramp: float, dry_run: bool) -> boo
     return ok
 
 
-def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> None:
+def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict],
+                           skipped_rows: list[dict]) -> None:
     channel_names = hdf5["channel_names"]
+    dofs = hdf5["dofs"]
     peaks = hdf5["peak_hz"]
     eratios = hdf5["eigenratio"]
     N = len(channel_names)
@@ -212,30 +229,36 @@ def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict]) -> Non
     all_col_labels = {c["label"] for c in config["cols"]}
     untouched_cols = sorted(all_col_labels - written_col_labels)
 
-    mode_info = {
-        "x": (peaks["x"], eratios["x"]),
-        "y": (peaks["y"], eratios["y"]),
-        "z": (peaks["z"], eratios["z"]),
-    }
     W = hdf5["W"]
-    mode_to_row_idx = {"x": 0, "y": 1, "z": 2}
+    mode_to_w_row = {m: i for i, m in enumerate(dofs)}
     ch_mode: dict[str, str] = {}
     for w_col, ch in enumerate(channel_names):
-        dominant_mode = max(mode_to_row_idx, key=lambda m: abs(W[mode_to_row_idx[m], w_col]))
+        dominant_mode = max(mode_to_w_row, key=lambda m: abs(W[mode_to_w_row[m], w_col]))
         ch_mode[ch] = dominant_mode
 
     print()
     print("=" * 70)
     print("  WARNING — SENSE matrix sparsity and diagonalization validity")
     print("=" * 70)
+    print(f"  Active DOFs: {dofs} (K={len(dofs)})")
     print(f"  This diagonalization was computed using N={N} sensor channel(s):")
     for ch in channel_names:
         mode = ch_mode.get(ch, "?")
-        f0, er = mode_info.get(mode, (float("nan"), float("nan")))
+        f0 = peaks.get(mode, float("nan"))
+        er = eratios.get(mode, float("nan"))
         f0_str = f"peak={f0:.2f} Hz" if not np.isnan(f0) else "peak=unknown"
         er_str = f"eigenratio={er:.1f}" if not np.isnan(er) else ""
         print(f"    {ch}  ({mode}-mode, {f0_str}{', ' + er_str if er_str else ''})")
     print()
+    if skipped_rows:
+        print("  INACTIVE mode rows (not in this diagonalization):")
+        for row_cfg in skipped_rows:
+            print(f"    {row_cfg['label']} ({row_cfg['mode']})")
+        print()
+        print("  These rows RETAIN their previous SENSE values. If feedback for")
+        print("  these modes was active, it is running on STALE coefficients.")
+        print("  Disable it or re-run step 01 with all DOFs included.")
+        print()
     if untouched_cols:
         print("  SENSE columns left UNTOUCHED (not in diagonalization):")
         for lbl in untouched_cols:
@@ -295,14 +318,14 @@ def main() -> None:
 
     config = load_config(config_path)
     hdf5 = load_hdf5(hdf5_path)
-    entries = build_mapping(hdf5, config)
+    entries, skipped_rows = build_mapping(hdf5, config)
 
     if not entries:
         print("ERROR: No SENSE entries could be mapped. Check that channel_names in the", file=sys.stderr)
         print("HDF5 match the channel_suffix values in sense_matrix_config.yml.", file=sys.stderr)
         sys.exit(1)
 
-    print_sparsity_warning(hdf5, config, entries)
+    print_sparsity_warning(hdf5, config, entries, skipped_rows)
 
     # Read current switch states (batch caget)
     if not args.dry_run:
