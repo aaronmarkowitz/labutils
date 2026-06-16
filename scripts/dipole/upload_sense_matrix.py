@@ -107,11 +107,14 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
         for col_cfg in config["cols"]:
             suffix = col_cfg["channel_suffix"]
             sense_col = col_cfg["index"]
-            if suffix not in ch_suffix_to_w_col:
-                continue  # column not in this diagonalization; skip
-            w_col = ch_suffix_to_w_col[suffix]
-            value = float(W[w_row, w_col])
             base = f"{prefix}-{mat}_{sense_row}_{sense_col}"
+            if suffix in ch_suffix_to_w_col:
+                w_col = ch_suffix_to_w_col[suffix]
+                value = float(W[w_row, w_col])
+                ch_name = channel_names[w_col]
+            else:
+                value = 0.0
+                ch_name = None
             entries.append({
                 "base": base,
                 "epics_channel": f"{base}_GAIN",
@@ -119,7 +122,7 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
                 "row_label": row_cfg["label"],
                 "col_label": col_cfg["label"],
                 "mode": mode,
-                "ch_name": channel_names[w_col],
+                "ch_name": ch_name,
             })
 
     return entries, skipped_rows
