@@ -7,6 +7,12 @@
 # Resonance estimates (f0/Q) below are SEEDS; the script fits measured f0/Q from
 # the response (for X/Y) and divides out the plant to get the flat gains.
 
+# (Optional) Path to step 01 sensor-diagonalization HDF5. When set, the script
+# reads the 'dofs' attribute from this file to determine which DOFs to measure.
+# CLI --step01-h5 overrides this. If neither is set, all DOFs in the 'dofs:'
+# section below are used.
+# step01_results_h5: "/path/to/step_01_sensor_diagonalization_results.h5"
+
 prefix: "Y1:DMD"
 electrodes: ["E1"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
 
@@ -119,7 +125,7 @@ analysis:
 guard_monitor:
   nds2_server: "192.168.1.11"
   nds2_port: 8088
-  channels: ["Y1:DMD-PARTICLE_X_IN1", "Y1:DMD-PARTICLE_Y_IN1", "Y1:DMD-PARTICLE_Z_IN1"]
+  channels: ["Y1:DMD-PARTICLE_X_IN1", "Y1:DMD-PARTICLE_Y_IN1"]
   band_hz: [10.0, 15.0]
   factor: 10000.0          # abort if band-RMS exceeds factor x baseline on any DOF
   baseline_seconds: 10

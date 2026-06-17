@@ -11,7 +11,7 @@ scripts are the **acquisition and EPICS-deploy** half (mirror of the
 |---|---|
 | `upload_sense_matrix.py` | Upload a sensor-diagonalization (SENSE) matrix to EPICS (consumes pipeline step_01 HDF5). |
 | `sense_matrix_config.yml` | SENSE matrix layout for `upload_sense_matrix.py`. |
-| `measure_actuator_gain.py` | **Measure** the flat actuator gain of POLES_E1..E4 to particle X/Y/Z via a `diag` SineResponse; extract a complex 3×4 coupling matrix. |
+| `measure_actuator_gain.py` | **Measure** the flat actuator gain of POLES_E1..E4 to active particle DOFs via a `diag` SineResponse; extract a complex K×4 coupling matrix (K = number of active DOFs, typically 2 or 3). |
 | `measure_actuator_gain_config.yml` | Parameters for `measure_actuator_gain.py`. |
 | `abort_actuator_gain.sh` | Emergency abort (touches the sentinel file; wire to an MEDM button). |
 | `tests/` | pytest suite (pure-logic) + opt-in `-m loopback` live hardware self-test. |
@@ -38,23 +38,54 @@ Frequency-division multiplexing means each tone is owned by one electrode, so th
 at that tone is that electrode's coupling into each DOF. Because all electrodes drive
 the *same* mechanical mode per DOF, the common plant `H_d(f)` is fit (Lorentzian
 f0, Q) and divided out, leaving the per-electrode **relative flat gains** (∝ counts→N).
-Output: a complex 3×4 matrix (rows X/Y/Z, cols E1..E4) + per-tone TF/coherence +
+Output: a complex K×4 matrix (rows = active DOFs, cols E1..E4) + per-tone TF/coherence +
 fitted f0/Q, in `$MQG_DROPBOX_PATH/worker1/data/YYMMDD/<timestamp>_actgain/`.
+The active DOF list is derived from the step 01 sensor-diagonalization HDF5 (via
+`--step01-h5`), or from the `dofs:` section of the config if no HDF5 is provided.
 Validated on the ACTS_8_8→LOS_IN1 loopback: 0.500 flat at every tone, coherence 1.0.
 
 ```
-measure_actuator_gain.py <config.yml> [--dry-run] [--premeasure-only] [--label NAME]
-                                       [--emit-xml] [--diaggui] [--analyze RAW_CAPTURE_H5]
+measure_actuator_gain.py <config.yml> [--step01-h5 PATH] [--dry-run] [--premeasure-only]
+                                       [--label NAME] [--emit-xml] [--diaggui]
+                                       [--analyze RAW_CAPTURE_H5]
 ```
+- `--step01-h5 PATH` — derive the active DOF list from a step 01 sensor-diagonalization
+  HDF5 (reads its `dofs` attribute, e.g. `["x", "y"]`). Only those DOFs are measured
+  and fitted. Without this flag, all DOFs defined in the config `dofs:` section are used.
 - `--dry-run` — build the tone plan + an example XML, touch **no** hardware (run first).
 - `--emit-xml` — write the comb diag XML for you to open in diaggui manually; no hardware.
 - `--diaggui` — write the XML and launch `diaggui` on it so you can watch the injection
   live (its multi-tone *coefficient* readout is unreliable — use it to watch, not to read
   gains).
-- `--analyze RAW_CAPTURE_H5` — recompute the 3×4 matrix offline from a saved
+- `--analyze RAW_CAPTURE_H5` — recompute the K×4 matrix offline from a saved
   `raw_capture.h5` (lets you re-tune `analysis.segment_s`, f0/Q seeds, etc. without
-  re-running hardware). The full run saves `raw_capture.h5` when
-  `analysis.save_raw_capture` is true.
+  re-running hardware). Respects `--step01-h5` for DOF selection. The full run saves
+  `raw_capture.h5` when `analysis.save_raw_capture` is true.
+
+### Typical workflow (2-DOF example)
+
+1. Run step 01 of the dipole pipeline with `dofs: [x, y]`. This produces an HDF5 at
+   `<output_dir>/step_01_sensor_diagonalization_results.h5` containing the 2×N W matrix
+   and a `dofs` attribute encoding `["x", "y"]`.
+
+2. Upload the new W matrix to the rtcds SENSE filter bank:
+   ```
+   /var/lib/cds-conda/base/envs/cds-testing/bin/python3 upload_sense_matrix.py \
+       sense_matrix_config.yml --step01-h5 <path_to_step01_results.h5>
+   ```
+
+3. Measure the actuator gain — dry-run first to verify the tone plan:
+   ```
+   /var/lib/cds-conda/base/envs/cds-testing/bin/python3 measure_actuator_gain.py \
+       measure_actuator_gain_config.yml \
+       --step01-h5 <path_to_step01_results.h5> \
+       --dry-run
+   ```
+   Then remove `--dry-run` for the real measurement. Only the X and Y resonances are
+   driven and fitted; the output is a 2×4 complex gain matrix.
+
+4. (Future) Feed the result into step 02 of the dipole pipeline
+   (`step_02_actuator_diagonalization.py`).
 
 ### Pipeline / control flow
 1. Generate the tone plan (guard-band-clean, bin-snapped, distinct; every electrode

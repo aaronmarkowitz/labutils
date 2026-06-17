@@ -6,8 +6,8 @@ This is the actuation counterpart to the SENSE pipeline (sensor diagonalization
 -> upload_sense_matrix.py). It drives a simultaneous multi-tone "SineResponse"
 measurement with the CLI tool ``diag`` (the headless form of diaggui), parses the
 result with the ``dttxml`` package, fits the mechanical plant resonance per DOF,
-and divides it out to recover a complex 3x4 relative coupling matrix
-(rows = DOF X/Y/Z, cols = electrode E1..E4).
+and divides it out to recover a complex K×4 relative coupling matrix
+(rows = active DOFs, cols = electrode E1..E4; K derived from step 01 HDF5 or config).
 
 METHOD (see README.md for the full rationale and pitfalls)
   * All four electrodes (POLES_E1..E4) are driven simultaneously, each at several
@@ -147,6 +147,26 @@ def validate_config(cfg: dict) -> None:
         raise ValueError("frequency_plan.guard_band_hz must be [low, high] with low < high")
 
 
+def resolve_active_dofs(cfg: dict, step01_h5_path: Path | None = None) -> list[str]:
+    """Determine the active DOF list for the measurement.
+
+    If *step01_h5_path* points to an existing step 01 results HDF5, reads its
+    ``dofs`` attribute (a JSON-encoded list like ``["x", "y"]``).  Otherwise
+    falls back to the keys defined in ``cfg["dofs"]``.
+    """
+    if step01_h5_path is not None and step01_h5_path.exists():
+        with h5py.File(step01_h5_path, "r") as f:
+            dofs = json.loads(f.attrs["dofs"])
+        for d in dofs:
+            if d not in cfg["dofs"]:
+                raise ValueError(
+                    f"Step 01 HDF5 lists DOF '{d}' but it is not defined in "
+                    f"cfg['dofs'] (available: {list(cfg['dofs'].keys())}). "
+                    f"Add a config section for it.")
+        return dofs
+    return list(cfg["dofs"].keys())
+
+
 # --------------------------------------------------------------------------- #
 # Frequency plan + Schroeder phasing  (pure functions, unit-tested)
 # --------------------------------------------------------------------------- #
@@ -154,7 +174,8 @@ def _snap_to_bin(freq: float, bin_hz: float) -> float:
     return round(freq / bin_hz) * bin_hz
 
 
-def generate_frequency_plan(cfg: dict, bin_hz: float) -> list[Tone]:
+def generate_frequency_plan(cfg: dict, bin_hz: float,
+                            active_dofs: list[str] | None = None) -> list[Tone]:
     """Build the list of excitation tones.
 
     Per DOF: place ``n_tones`` frequencies symmetrically around the seed f0 with
@@ -163,6 +184,9 @@ def generate_frequency_plan(cfg: dict, bin_hz: float) -> list[Tone]:
     driven near every resonance, and dense DOFs give some electrodes a 2nd tone to
     pin the Lorentzian). Finally enforce global distinctness (>= min_bin_separation
     bins apart) across ALL tones.
+
+    *active_dofs*: subset of ``cfg["dofs"]`` keys to generate tones for. If None,
+    generates for all configured DOFs (backward-compatible default).
 
     Raises ValueError if a DOF's tones cannot be placed outside the guard band.
     """
@@ -184,8 +208,9 @@ def generate_frequency_plan(cfg: dict, bin_hz: float) -> list[Tone]:
         above = guard_hi + min_sep_hz
         return below if abs(f - guard_lo) <= abs(f - guard_hi) else above
 
+    dof_items = {d: cfg["dofs"][d] for d in active_dofs} if active_dofs else cfg["dofs"]
     tones: list[Tone] = []
-    for dof, d in cfg["dofs"].items():
+    for dof, d in dof_items.items():
         n = int(d["n_tones"])
         spacing = float(d["tone_spacing_hz"])
         f0 = float(d["f0"])
@@ -589,7 +614,8 @@ class GuardMonitor(threading.Thread):
 # diag XML generation + invocation
 # --------------------------------------------------------------------------- #
 def build_sine_response_xml(cfg: dict, tones: list[Tone], meas: dict,
-                            meas_channels: list[str] | None = None) -> str:
+                            meas_channels: list[str] | None = None,
+                            active_dofs: list[str] | None = None) -> str:
     """Generate a diaggui SineResponse measurement XML from scratch.
 
     Convention (verified against a real comb result): the Stimulus* arrays are
@@ -599,12 +625,13 @@ def build_sine_response_xml(cfg: dict, tones: list[Tone], meas: dict,
 
     Each tone's excitation channel is ``tone.channel`` if set, else the derived
     ``{prefix}-POLES_{electrode}_EXC``. ``meas_channels`` overrides the default
-    three PARTICLE_{X,Y,Z}_IN1 readbacks (used by the loopback self-test).
+    PARTICLE_{DOF}_IN1 readbacks (used by the loopback self-test).
     """
     prefix = cfg["prefix"]
     rate = cfg["measurement_channel_rate"]
     if meas_channels is None:
-        meas_channels = [cfg["dofs"][d]["channel"] for d in ("x", "y", "z")]
+        dofs = active_dofs or list(cfg["dofs"].keys())
+        meas_channels = [cfg["dofs"][d]["channel"] for d in dofs]
 
     # stimulus rows in a stable order (sorted by frequency)
     rows = sorted(tones, key=lambda t: t.freq)
@@ -725,7 +752,8 @@ def _exc_channel(cfg: dict, tone: Tone) -> str:
 
 
 def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
-                       label: str, abort_event: threading.Event, sentinel: Path):
+                       label: str, abort_event: threading.Event, sentinel: Path,
+                       active_dofs: list[str] | None = None):
     """Inject the comb with diag and capture raw PARTICLE + excitation channels.
 
     diag runs in a background thread (its injection is correct and its result XML is
@@ -737,7 +765,8 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
     timeout_s = max(float(cfg["diag"]["diag_timeout_s"]), meas["min_time_s"] + 60)
 
     gen_xml = run_dir / f"gen_{label}.xml"
-    gen_xml.write_text(build_sine_response_xml(cfg, tones, meas))
+    gen_xml.write_text(build_sine_response_xml(cfg, tones, meas,
+                                               active_dofs=active_dofs))
     result_xml = run_dir / f"result_{label}.xml"
 
     diag_err: dict = {}
@@ -758,7 +787,8 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
         time.sleep(0.5)
         waited += 0.5
 
-    chans = [cfg["dofs"][d]["channel"] for d in ("x", "y", "z")]
+    dofs = active_dofs or list(cfg["dofs"].keys())
+    chans = [cfg["dofs"][d]["channel"] for d in dofs]
     chans += [_exc_channel(cfg, t) for t in tones]
     chans = sorted(set(chans))            # dedup for the NDS2 request
     conn = nds2.connection(an["nds2_server"], int(an["nds2_port"]))
@@ -783,7 +813,8 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
 
 
 def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict,
-                segment_s: float | None = None) -> list[dict]:
+                segment_s: float | None = None,
+                active_dofs: list[str] | None = None) -> list[dict]:
     """Per-tone transfer coefficients + coherence from raw captured data.
 
     For a tone driven on excitation channel E at frequency f, and DOF channel R:
@@ -795,7 +826,8 @@ def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict,
     segment_s overrides cfg["analysis"]["segment_s"] when supplied (used by the trim
     loop, which may increase segment_s beyond the config default to improve coherence).
     """
-    dof_ch = {d: cfg["dofs"][d]["channel"] for d in ("x", "y", "z")}
+    dofs = active_dofs or list(cfg["dofs"].keys())
+    dof_ch = {d: cfg["dofs"][d]["channel"] for d in dofs}
     seg = segment_s if segment_s is not None else float(cfg["analysis"]["segment_s"])
     nperseg = max(256, int(seg * fs))
     exc_names = sorted({_exc_channel(cfg, t) for t in tones})
@@ -816,7 +848,7 @@ def compute_tfs(captured: dict, fs: float, tones: list[Tone], cfg: dict,
         i = int(np.argmin(np.abs(f_arr - t.freq)))
         rec = {"electrode": t.electrode, "dof_intended": t.dof,
                "freq": t.freq, "tf": {}, "coh": {}}
-        for d in ("x", "y", "z"):
+        for d in dofs:
             denom = Pee[ec][i] if abs(Pee[ec][i]) > 0 else 1.0
             rec["tf"][d] = complex(Per[(ec, d)][i] / denom)
             coh = (abs(Per[(ec, d)][i]) ** 2) / (abs(Pee[ec][i]) * abs(Prr[d][i]) + 1e-30)
@@ -900,51 +932,53 @@ def fit_dof(records: list[dict], dof: str, electrodes: list[str],
                   per_electrode_coherence=per_e_coh)
 
 
-def assemble_gain_matrix(dof_fits: dict, electrodes: list[str]) -> np.ndarray:
-    """Stack per-DOF gains into a complex (3, n_electrodes) matrix (rows x/y/z)."""
-    return np.array([dof_fits[d].gains for d in ("x", "y", "z")], dtype=complex)
+def assemble_gain_matrix(dof_fits: dict, electrodes: list[str],
+                         active_dofs: list[str] | None = None) -> np.ndarray:
+    """Stack per-DOF gains into a complex (K, n_electrodes) matrix."""
+    dofs = active_dofs or list(dof_fits.keys())
+    return np.array([dof_fits[d].gains for d in dofs], dtype=complex)
 
 
 # --------------------------------------------------------------------------- #
 # Output writers
 # --------------------------------------------------------------------------- #
 def write_hdf5(run_dir: Path, gain_matrix: np.ndarray, dof_fits: dict,
-               records: list[dict], cfg_text: str, electrodes: list[str]) -> Path:
+               records: list[dict], cfg_text: str, electrodes: list[str],
+               active_dofs: list[str] | None = None) -> Path:
+    dofs = active_dofs or list(dof_fits.keys())
     path = run_dir / "actuator_gain_results.h5"
     with h5py.File(path, "w") as f:
         f.create_dataset("gain_matrix_real", data=gain_matrix.real)
         f.create_dataset("gain_matrix_imag", data=gain_matrix.imag)
         f.create_dataset("tone_freqs", data=np.array([r["freq"] for r in records]))
-        for d in ("x", "y", "z"):
+        for d in dofs:
             f.create_dataset(f"tf_{d}_real",
                              data=np.array([r["tf"][d].real for r in records]))
             f.create_dataset(f"tf_{d}_imag",
                              data=np.array([r["tf"][d].imag for r in records]))
             f.create_dataset(f"coherence_{d}",
                              data=np.array([r["coh"][d] for r in records]))
-        # mirror step_01 attr conventions: fitted resonance freqs + channel names
-        f.attrs["peak_frequency_hz_x"] = dof_fits["x"].f0
-        f.attrs["peak_frequency_hz_y"] = dof_fits["y"].f0
-        f.attrs["peak_frequency_hz_z"] = dof_fits["z"].f0
-        for d in ("x", "y", "z"):
+        for d in dofs:
+            f.attrs[f"peak_frequency_hz_{d}"] = dof_fits[d].f0
             f.attrs[f"Q_{d}"] = dof_fits[d].Q
             f.attrs[f"fit_plant_{d}"] = dof_fits[d].fit_plant
             f.attrs[f"residual_norm_{d}"] = dof_fits[d].residual_norm
         f.attrs["electrodes"] = json.dumps(electrodes)
         f.attrs["tone_electrode"] = json.dumps([r["electrode"] for r in records])
-        f.attrs["dof_order"] = json.dumps(["x", "y", "z"])
+        f.attrs["dof_order"] = json.dumps(dofs)
         f.attrs["channel_names"] = json.dumps([r["electrode"] for r in records])
         f.attrs["params_yaml"] = cfg_text
     return path
 
 
 def write_report(run_dir: Path, gain_matrix: np.ndarray, dof_fits: dict,
-                 electrodes: list[str]) -> Path:
+                 electrodes: list[str], active_dofs: list[str] | None = None) -> Path:
+    dofs = active_dofs or list(dof_fits.keys())
     path = run_dir / "actuator_gain_report.txt"
     lines = []
     lines.append("Actuator gain measurement report")
     lines.append("=" * 60)
-    for d in ("x", "y", "z"):
+    for d in dofs:
         fit = dof_fits[d]
         lines.append(f"\nDOF {d.upper()}: f0={fit.f0:.4f} Hz  Q={fit.Q:.2f}  "
                      f"(plant {'fit' if fit.fit_plant else 'fixed'})  "
@@ -953,8 +987,9 @@ def write_report(run_dir: Path, gain_matrix: np.ndarray, dof_fits: dict,
             g = fit.gains[i]
             lines.append(f"    {e}: |G|={abs(g):.4g}  phase={np.degrees(np.angle(g)):+7.1f} deg"
                          f"   coh_max={fit.per_electrode_coherence.get(e, 0):.3f}")
-    lines.append("\nGain matrix |G| (rows x/y/z, cols " + ",".join(electrodes) + "):")
-    for d_i, d in enumerate(("x", "y", "z")):
+    lines.append("\nGain matrix |G| (rows " + "/".join(d.upper() for d in dofs)
+                 + ", cols " + ",".join(electrodes) + "):")
+    for d_i, d in enumerate(dofs):
         lines.append("  " + "  ".join(f"{abs(gain_matrix[d_i, j]):10.4g}"
                                        for j in range(len(electrodes))))
     text = "\n".join(lines) + "\n"
@@ -1001,7 +1036,8 @@ def load_raw_capture(path: Path):
 
 def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
                       cfg_text: str, electrodes: list[str],
-                      plots_dir: Path | None = None, is_trim: bool = False):
+                      plots_dir: Path | None = None, is_trim: bool = False,
+                      active_dofs: list[str] | None = None):
     """Fit the plant + gains, assemble the matrix, write HDF5 + report + plots.
 
     plots_dir: override plot output directory (default: run_dir/plots/ for the final
@@ -1010,14 +1046,15 @@ def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
     full scatter opacity regardless of coherence).
     Shared by the live measurement and the offline `--analyze` mode.
     """
+    dofs = active_dofs or list(cfg["dofs"].keys())
     dof_fits = {}
-    for d in ("x", "y", "z"):
+    for d in dofs:
         dd = cfg["dofs"][d]
         dof_fits[d] = fit_dof(records, d, electrodes, float(dd["f0"]),
                               float(dd["Q"]), bool(dd.get("fit_plant", True)))
-    gain_matrix = assemble_gain_matrix(dof_fits, electrodes)
-    h5 = write_hdf5(run_dir, gain_matrix, dof_fits, records, cfg_text, electrodes)
-    write_report(run_dir, gain_matrix, dof_fits, electrodes)
+    gain_matrix = assemble_gain_matrix(dof_fits, electrodes, dofs)
+    h5 = write_hdf5(run_dir, gain_matrix, dof_fits, records, cfg_text, electrodes, dofs)
+    write_report(run_dir, gain_matrix, dof_fits, electrodes, dofs)
     print(f"Saved: {h5}")
 
     # Bode plots
@@ -1037,10 +1074,16 @@ def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
 # --------------------------------------------------------------------------- #
 # Trim loop helpers
 # --------------------------------------------------------------------------- #
-def worst_xy_coherence(records: list[dict]) -> float:
-    """Minimum coherence over X/Y on each tone's intended DOF (Z excluded)."""
+def worst_primary_coherence(records: list[dict], active_dofs: list[str]) -> float:
+    """Minimum coherence over primary DOFs on each tone's intended DOF.
+
+    Z is excluded from the coherence target because its resonance (~5 Hz) gives
+    far fewer cycles per measurement window, resulting in structurally lower
+    coherence. If Z is the only active DOF, it is used.
+    """
+    primary = [d for d in active_dofs if d != "z"] or active_dofs
     vals = [r["coh"][r["dof_intended"]] for r in records
-            if r["dof_intended"] in ("x", "y")]
+            if r["dof_intended"] in primary]
     return min(vals) if vals else 1.0
 
 
@@ -1088,6 +1131,8 @@ def main() -> None:
                     help="Write the comb XML and launch diaggui on it to watch live; no analysis")
     ap.add_argument("--analyze", metavar="RAW_CAPTURE_H5", default=None,
                     help="Recompute the gain matrix offline from a saved raw_capture.h5; no hardware")
+    ap.add_argument("--step01-h5", metavar="PATH", default=None,
+                    help="Step 01 HDF5 to derive the active DOF list from (reads its 'dofs' attr)")
     ap.add_argument("--label", default=None, help="Override run_label")
     args = ap.parse_args()
 
@@ -1096,17 +1141,24 @@ def main() -> None:
     cfg_text = Path(args.config).read_text()
     electrodes = list(cfg["electrodes"])
 
+    step01_path = (Path(args.step01_h5) if args.step01_h5
+                   else (Path(cfg["step01_results_h5"])
+                         if cfg.get("step01_results_h5") else None))
+    active_dofs = resolve_active_dofs(cfg, step01_path)
+    print(f"Active DOFs: {active_dofs}"
+          f" (from {'step 01 HDF5' if step01_path else 'config'})")
+
     # ---- offline re-analysis of a saved raw capture (no hardware) ----
     if args.analyze:
         cap_path = Path(args.analyze)
         captured, fs, tones, _ = load_raw_capture(cap_path)
-        records = compute_tfs(captured, fs, tones, cfg)   # CLI cfg -> re-tunable segment_s
+        records = compute_tfs(captured, fs, tones, cfg, active_dofs=active_dofs)
         run_dir = cap_path.resolve().parent / "reanalysis"
         run_dir.mkdir(exist_ok=True)
         print(f"Re-analyzing {cap_path} -> {run_dir}")
         plots_dir = _resolve_plots_dir(cfg, run_dir, label=None)
         analyze_and_write(cfg, records, run_dir, cfg_text, electrodes,
-                          plots_dir=plots_dir)
+                          plots_dir=plots_dir, active_dofs=active_dofs)
         return
 
     # Tones are snapped to the analysis FFT bin (1 / Welch segment length) so each
@@ -1136,7 +1188,7 @@ def main() -> None:
         if m["min_time_s"] < required:
             m["min_time_s"] = required
 
-    tones = generate_frequency_plan(cfg, bin_hz)
+    tones = generate_frequency_plan(cfg, bin_hz, active_dofs=active_dofs)
     init_amp = cfg["amplitude"]["initial_amplitude_counts"]
     for t in tones:
         t.amp_counts = float(init_amp)
@@ -1160,14 +1212,15 @@ def main() -> None:
     _print_plan(tones, electrodes)
 
     if args.dry_run:
-        gen = build_sine_response_xml(cfg, tones, premeasure)
+        gen = build_sine_response_xml(cfg, tones, premeasure, active_dofs=active_dofs)
         (run_dir / "gen_dryrun.xml").write_text(gen)
         print(f"\nDRY RUN: wrote example XML to {run_dir/'gen_dryrun.xml'}; no hardware touched.")
         return
 
     if args.emit_xml or args.diaggui:
         xml_path = run_dir / "gen_emit.xml"
-        xml_path.write_text(build_sine_response_xml(cfg, tones, measure))
+        xml_path.write_text(build_sine_response_xml(cfg, tones, measure,
+                                                    active_dofs=active_dofs))
         amp = cfg["amplitude"]["initial_amplitude_counts"]
         print(f"\nWrote comb XML to {xml_path}")
         print(f"  (untrimmed; all tones at the initial {amp} counts -- adjust in diaggui as needed)")
@@ -1266,14 +1319,16 @@ def main() -> None:
                   f"min_time={meas['min_time_s']}s capture={meas['capture_s']:.1f}s "
                   f"max_amp={max(t.amp_counts for t in tones):.0f} cts -> inject+capture...")
             captured, fs, _ = inject_and_capture(cfg, tones, meas, run_dir,
-                                                 f"{it:02d}", abort_event, sentinel)
-            records = compute_tfs(captured, fs, tones, cfg, segment_s=trim_segment_s)
+                                                 f"{it:02d}", abort_event, sentinel,
+                                                 active_dofs=active_dofs)
+            records = compute_tfs(captured, fs, tones, cfg, segment_s=trim_segment_s,
+                                  active_dofs=active_dofs)
             # Trim-step plots: fit plant+gains and plot without writing HDF5/report.
             if _plot_measurement is not None:
                 trim_plots_dir = _resolve_plots_dir(cfg, run_dir, None) / f"trim_{it:02d}"
                 try:
                     trim_dof_fits = {}
-                    for d in ("x", "y", "z"):
+                    for d in active_dofs:
                         dd = cfg["dofs"][d]
                         trim_dof_fits[d] = fit_dof(records, d, electrodes,
                                                    float(dd["f0"]), float(dd["Q"]),
@@ -1282,14 +1337,15 @@ def main() -> None:
                                       trim_plots_dir, is_trim=True)
                 except Exception as e:  # noqa: BLE001
                     print(f"  WARNING: trim-step plotting failed ({e})")
-            worst = worst_xy_coherence(records)
-            print(f"  worst X/Y coherence = {worst:.3f} (target {cfg['trim']['target_coherence']})")
+            worst = worst_primary_coherence(records, active_dofs)
+            print(f"  worst primary coherence = {worst:.3f} (target {cfg['trim']['target_coherence']})")
             if worst >= cfg["trim"]["target_coherence"]:
                 break
             if it == cfg["trim"]["max_trim_iters"] or args.premeasure_only:
                 break
             meas, trim_segment_s, changed_amp = _trim_step(
-                cfg, tones, records, meas, trim_segment_s, premeasure_n_avgs)
+                cfg, tones, records, meas, trim_segment_s, premeasure_n_avgs,
+                active_dofs=active_dofs)
             if changed_amp:
                 print("  (raised amplitudes; Schroeder phases will be recomputed)")
 
@@ -1316,16 +1372,18 @@ def main() -> None:
               f"min_time={final_meas['min_time_s']}s capture={final_meas['capture_s']:.1f}s "
               f"-> inject+capture...")
         captured, fs, _ = inject_and_capture(cfg, tones, final_meas, run_dir,
-                                             "final", abort_event, sentinel)
+                                             "final", abort_event, sentinel,
+                                             active_dofs=active_dofs)
         _check_aborts(abort_event, sentinel)
         if cfg["analysis"].get("save_raw_capture", True):
             save_raw_capture(run_dir, captured, fs, tones, cfg_text)
-        records = compute_tfs(captured, fs, tones, cfg, segment_s=final_segment_s)
+        records = compute_tfs(captured, fs, tones, cfg, segment_s=final_segment_s,
+                              active_dofs=active_dofs)
 
         # ---------------- analysis (shared with --analyze) ---------------------
         final_plots_dir = _resolve_plots_dir(cfg, run_dir, label=None)
         analyze_and_write(cfg, records, run_dir, cfg_text, electrodes,
-                          plots_dir=final_plots_dir)
+                          plots_dir=final_plots_dir, active_dofs=active_dofs)
 
     except AbortRequested as e:
         print(f"\n*** ABORT: {e} ***  (excitation will be zeroed, POLES restored)")
@@ -1341,7 +1399,8 @@ def main() -> None:
         print(f"Output: {run_dir}")
 
 
-def _trim_step(cfg, tones, records, meas, segment_s: float, n_averages: int):
+def _trim_step(cfg, tones, records, meas, segment_s: float, n_averages: int,
+               active_dofs: list[str] | None = None):
     """Segment-first then amplitude. Returns (new_meas, new_segment_s, changed_amp).
 
     Step 1 — segment_s: double the Welch segment length (halves the bin, improves SNR
@@ -1370,12 +1429,14 @@ def _trim_step(cfg, tones, records, meas, segment_s: float, n_averages: int):
                                      warmup + new_meas["capture_s"] + margin)
         return new_meas, new_seg, changed_amp
 
-    # 2) amplitude: raise under-coherent X/Y tones up to the cap
+    # 2) amplitude: raise under-coherent primary tones up to the cap
+    dofs = active_dofs or list(cfg["dofs"].keys())
+    primary = [d for d in dofs if d != "z"] or dofs
     step = cfg["amplitude"]["amp_step_factor"]
     cap = cfg["amplitude"]["max_amplitude_counts"]
     low_tones = set()
     for r in records:
-        if r["dof_intended"] in ("x", "y") and r["coh"][r["dof_intended"]] < target:
+        if r["dof_intended"] in primary and r["coh"][r["dof_intended"]] < target:
             low_tones.add((r["freq"], r["electrode"]))
     for t in tones:
         if (t.freq, t.electrode) in low_tones:

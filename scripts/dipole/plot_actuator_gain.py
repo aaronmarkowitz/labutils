@@ -115,7 +115,7 @@ def _build_bode_figure(
     f_curve = _freq_curve(all_records)
 
     # ---- amplitude + phase: one curve per DOF ----
-    for dof in ("x", "y", "z"):
+    for dof in dof_fits:
         fit = dof_fits.get(dof)
         if fit is None:
             continue
@@ -141,8 +141,8 @@ def _build_bode_figure(
         e_idx = electrodes.index(r["electrode"]) if r["electrode"] in electrodes else 0
         marker = _elec_marker(e_idx)
 
-        for dof in ("x", "y", "z"):
-            color = _DOF_COLORS[dof]
+        for dof in r["tf"]:
+            color = _DOF_COLORS.get(dof, "#333333")
             alpha = 1.0 if is_trim else float(np.clip(r["coh"][dof], 0.05, 1.0))
             tf_val = r["tf"][dof]
             ax_amp.scatter(r["freq"], abs(tf_val),
@@ -165,9 +165,9 @@ def _build_bode_figure(
         ]
         dof_handles = [
             plt.Line2D([0], [0], marker="o", color="w",
-                       markerfacecolor=_DOF_COLORS[d], markersize=7,
+                       markerfacecolor=_DOF_COLORS.get(d, "#333333"), markersize=7,
                        label=d.upper())
-            for d in ("x", "y", "z")
+            for d in dof_fits
         ]
         ax_coh.legend(handles=elec_handles + dof_handles, fontsize=7,
                       loc="lower right", ncol=2)
@@ -197,7 +197,7 @@ def _build_bode_figure(
 # --------------------------------------------------------------------------- #
 def _build_gain_matrix_figure(dof_fits: dict, electrodes: list) -> plt.Figure:
     """2D heatmap of |G| with complex-phase angle annotations."""
-    dofs = ["x", "y", "z"]
+    dofs = list(dof_fits.keys())
     n_dof = len(dofs)
     n_elec = len(electrodes)
 
@@ -324,39 +324,33 @@ def _load_results_h5(h5_path: Path):
         tone_freqs = f["tone_freqs"][:]
         tone_electrode = json.loads(f.attrs["tone_electrode"])
         electrodes = json.loads(f.attrs["electrodes"])
+        dofs = json.loads(f.attrs.get("dof_order", '["x", "y", "z"]'))
 
         tf = {}
         coh = {}
-        for d in ("x", "y", "z"):
+        for d in dofs:
             tf[d] = f[f"tf_{d}_real"][:] + 1j * f[f"tf_{d}_imag"][:]
             coh[d] = f[f"coherence_{d}"][:]
 
-        # Reconstruct dof_intended from the electrode assignment and tone order;
-        # it is not stored in the HDF5 — use an empty string as fallback.
-        # (The records are used for plotting; dof_intended is only needed for
-        #  alpha-by-coherence, which falls back to the coh value of each DOF.)
-        # If the file was written with tone_electrode attr we can infer dof_intended
-        # approximately from which cluster of tones each electrode belongs to.
-        # For simplicity, default to "x" (only affects scatter colour in trim plots).
         n_tones = len(tone_freqs)
         records = []
         for i in range(n_tones):
             rec = {
                 "electrode": tone_electrode[i],
-                "dof_intended": "x",   # best-effort; not stored in h5
+                "dof_intended": dofs[0],   # best-effort; not stored in h5
                 "freq": float(tone_freqs[i]),
-                "tf": {d: complex(tf[d][i]) for d in ("x", "y", "z")},
-                "coh": {d: float(coh[d][i]) for d in ("x", "y", "z")},
+                "tf": {d: complex(tf[d][i]) for d in dofs},
+                "coh": {d: float(coh[d][i]) for d in dofs},
             }
             records.append(rec)
 
         # Reconstruct DofFit-like objects from attrs
-        gain_real = f["gain_matrix_real"][:]   # shape (3, n_elec)
+        gain_real = f["gain_matrix_real"][:]   # shape (K, n_elec)
         gain_imag = f["gain_matrix_imag"][:]
         gain_matrix = gain_real + 1j * gain_imag
 
         dof_fits = {}
-        for i, d in enumerate(("x", "y", "z")):
+        for i, d in enumerate(dofs):
             dof_fits[d] = SimpleNamespace(
                 dof=d,
                 f0=float(f.attrs[f"peak_frequency_hz_{d}"]),
@@ -402,12 +396,13 @@ def main() -> None:
             raw = json.load(fj)
         records = []
         for r in raw:
+            rec_dofs = list(r["tf"].keys())
             records.append({
                 "electrode": r["electrode"],
-                "dof_intended": r.get("dof_intended", "x"),
+                "dof_intended": r.get("dof_intended", rec_dofs[0]),
                 "freq": float(r["freq"]),
-                "tf": {d: complex(r["tf"][d]) for d in ("x", "y", "z")},
-                "coh": {d: float(r["coh"][d]) for d in ("x", "y", "z")},
+                "tf": {d: complex(r["tf"][d]) for d in rec_dofs},
+                "coh": {d: float(r["coh"][d]) for d in rec_dofs},
             })
 
     # Build a minimal cfg for fallback f0/Q display
