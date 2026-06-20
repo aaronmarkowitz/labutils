@@ -44,6 +44,7 @@ Usage:
 
 import argparse
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -1231,7 +1232,7 @@ def main() -> None:
     electrodes = list(cfg["electrodes"])
 
     step01_path = (Path(args.step01_h5) if args.step01_h5
-                   else (Path(cfg["step01_results_h5"])
+                   else (Path(os.path.expandvars(cfg["step01_results_h5"]))
                          if cfg.get("step01_results_h5") else None))
     active_dofs = resolve_active_dofs(cfg, step01_path)
     print(f"Active DOFs: {active_dofs}"
