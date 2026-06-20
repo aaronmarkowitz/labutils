@@ -36,6 +36,19 @@ electrodes: ["E1"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
 #   Z placement: set dofs.z.f0 above guard_band_hz[1] (e.g. f0: 25.0) to place
 #   Z tones above the guard band entirely. The frequency plan pushes tones away
 #   from the guard band in both directions — tones seeded above 20 Hz stay above.
+#
+#   fit_strategy (only applies when fit_plant: true):
+#     "joint"           - original: complex fit of f0, Q, G using ALL tones across
+#                         all DOFs. Fast, but vulnerable to cross-DOF coupling
+#                         (e.g. X resonance bleeding into Y sensor at X-band freqs).
+#     "dof_filtered"    - same complex fit, but restricted to tones whose
+#                         dof_intended matches this DOF. Removes cross-coupling
+#                         contamination while keeping full complex phase info.
+#     "mag_then_linear" - two-step: (1) magnitude-only Lorentzian fit for f0/Q on
+#                         dof-intended tones (immune to phase corruption), then
+#                         (2) |H|^2-weighted linear solve for complex G. Most
+#                         robust when phase data is noisy or cross-coupling is
+#                         strong, at the cost of slightly noisier G phase.
 dofs:
   x:
     channel: "Y1:DMD-PARTICLE_X_IN1"
@@ -44,6 +57,7 @@ dofs:
     n_tones: 8            # 8 tones / 4 electrodes = 2 per electrode; 8+8+4=20 total
     tone_spacing_hz: 1.5
     fit_plant: true
+    fit_strategy: dof_filtered
   y:
     channel: "Y1:DMD-PARTICLE_Y_IN1"
     f0: 54.0
@@ -51,6 +65,7 @@ dofs:
     n_tones: 8            # same; 4 electrodes each get 5 tones total (2x + 2y + 1z)
     tone_spacing_hz: 1.5
     fit_plant: true
+    fit_strategy: mag_then_linear
   z:
     channel: "Y1:DMD-PARTICLE_Z_IN1"
     f0: 25.0               # change to e.g. 25.0 to place Z tones above the guard band

@@ -103,6 +103,24 @@ measure_actuator_gain.py <config.yml> [--step01-h5 PATH] [--dry-run] [--premeasu
    HDF5 + report (and diag's result XML alongside).
 6. `finally`: ramp excitation to zero, restore all POLES and ACTS settings (idempotent).
 
+### Plant fit strategies (`fit_strategy`)
+
+When `fit_plant: true`, the `fit_strategy` per-DOF option controls how f0, Q, and
+per-electrode complex gains are extracted from the transfer function data:
+
+| Strategy | Algorithm | When to use |
+|----------|-----------|-------------|
+| `joint` | Complex fit of f0, Q, G using ALL tones (across all DOFs). | Default when cross-coupling is negligible (X in typical runs). |
+| `dof_filtered` | Same complex fit, restricted to tones with `dof_intended` matching this DOF. | General default; eliminates cross-DOF contamination from the fit. |
+| `mag_then_linear` | Magnitude-only Lorentzian fit for f0/Q (on dof-intended tones), then weighted linear solve for complex G. | When phase corruption from cross-coupling causes the complex fit to converge to a wrong resonance (common for Y when X is nearby and strongly coupled). |
+
+**Cross-coupling failure mode (motivates `mag_then_linear`):** When nearby DOFs
+(e.g. X at 40 Hz, Y at 55 Hz) are measured simultaneously, X excitation produces a
+correlated but wrong-phase response in the Y channel. The complex fit can latch onto
+this cross-coupling signal and converge to a spurious minimum (e.g. f0=65 Hz for Y
+instead of the correct ~55 Hz). The magnitude-only fit is immune because the |TF|
+peak at the true resonance is unambiguous regardless of phase corruption.
+
 ### Safety (read before running on a real particle)
 - **Trap-loss guard**: background NDS2 monitor of the **10–20 Hz** band-RMS of
   PARTICLE_X/Y/Z. If it exceeds `guard_monitor.factor` × baseline on any DOF → abort

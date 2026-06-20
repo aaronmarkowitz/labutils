@@ -868,67 +868,155 @@ def plant_lorentzian(f, f0, Q):
     return h_raw / peak
 
 
+def _coh_weight(coh):
+    """Coherence-based weight: sqrt(coh / (1 - coh))."""
+    c = np.clip(coh, 0, 0.999999)
+    return np.sqrt(c / (1.0 - c + 1e-6))
+
+
 def fit_dof(records: list[dict], dof: str, electrodes: list[str],
-            f0_seed: float, Q_seed: float, fit_plant: bool) -> DofFit:
+            f0_seed: float, Q_seed: float, fit_plant: bool,
+            fit_strategy: str = "joint") -> DofFit:
     """Fit the shared plant (optional) + per-electrode complex gains for one DOF.
 
     Model: TF_meas(electrode e at freq f, measured in this DOF) = G[e] * H(f; f0, Q).
-    Uses ALL tones (every tone is measured in every DOF), so off-resonance and
-    cross-coupling information contributes through the shared H.
+
+    fit_strategy (used only when fit_plant=True):
+      "joint"          - complex fit of f0, Q, G using ALL tones (original algorithm)
+      "dof_filtered"   - same complex fit, but only tones with dof_intended == dof
+      "mag_then_linear"- magnitude-only fit for f0/Q on dof-intended tones, then
+                         |H|^2-weighted linear solve for complex G
     """
+    VALID_STRATEGIES = ("joint", "dof_filtered", "mag_then_linear")
+    if fit_strategy not in VALID_STRATEGIES:
+        raise ValueError(f"fit_strategy must be one of {VALID_STRATEGIES}, got {fit_strategy!r}")
+
     n_e = len(electrodes)
     e_index = {e: i for i, e in enumerate(electrodes)}
-    freqs = np.array([r["freq"] for r in records], dtype=float)
-    tf = np.array([r["tf"][dof] for r in records], dtype=complex)
-    coh = np.array([r["coh"][dof] for r in records], dtype=float)
-    e_idx = np.array([e_index[r["electrode"]] for r in records], dtype=int)
-    w = np.sqrt(np.clip(coh, 0, 0.999999) / (1.0 - np.clip(coh, 0, 0.999999) + 1e-6))
 
-    def unpack(p):
-        if fit_plant:
+    # Select records based on strategy
+    if fit_plant and fit_strategy in ("dof_filtered", "mag_then_linear"):
+        fit_records = [r for r in records if r["dof_intended"] == dof]
+    else:
+        fit_records = list(records)
+
+    freqs = np.array([r["freq"] for r in fit_records], dtype=float)
+    tf = np.array([r["tf"][dof] for r in fit_records], dtype=complex)
+    coh = np.array([r["coh"][dof] for r in fit_records], dtype=float)
+    e_idx = np.array([e_index[r["electrode"]] for r in fit_records], dtype=int)
+    w = _coh_weight(coh)
+
+    if fit_plant and fit_strategy == "mag_then_linear":
+        # --- Step 1: magnitude-only fit for f0, Q, |G| per electrode ---
+        # Jointly fit the plant shape and per-electrode gain magnitudes.
+        # Immune to phase corruption from cross-coupling.
+        H_seed = plant_lorentzian(freqs, f0_seed, Q_seed)
+        G0_mag = np.ones(n_e)
+        for i in range(n_e):
+            mask = e_idx == i
+            if np.any(mask):
+                sel = np.where(mask)[0][np.argmax(np.abs(tf[mask]))]
+                denom = abs(H_seed[sel]) if abs(H_seed[sel]) > 1e-12 else 1.0
+                G0_mag[i] = abs(tf[sel]) / denom
+
+        p0_mag = np.concatenate([[f0_seed, Q_seed], G0_mag])
+        lb_mag = np.concatenate([[f0_seed * 0.8, Q_seed * 0.2], np.zeros(n_e)])
+        ub_mag = np.concatenate([[f0_seed * 1.2, Q_seed * 2.0], np.inf * np.ones(n_e)])
+
+        def mag_residuals(p):
             f0, Q = p[0], p[1]
-            g = p[2:2 + 2 * n_e]
-        else:
-            f0, Q = f0_seed, Q_seed
-            g = p
-        G = g[0::2] + 1j * g[1::2]
-        return f0, Q, G
+            G_mag = p[2:2 + n_e]
+            H = plant_lorentzian(freqs, f0, Q)
+            return w * (G_mag[e_idx] * np.abs(H) - np.abs(tf))
 
-    def residuals(p):
-        f0, Q, G = unpack(p)
-        model = G[e_idx] * plant_lorentzian(freqs, f0, Q)
-        r = w * (model - tf)
-        return np.concatenate([r.real, r.imag])
+        sol_mag = sp_optimize.least_squares(
+            mag_residuals, p0_mag, bounds=(lb_mag, ub_mag), method="trf")
+        f0_fit, Q_fit = float(sol_mag.x[0]), float(sol_mag.x[1])
 
-    # seed gains from the nearest tone per electrode
-    G0 = np.ones(n_e, dtype=complex)
-    H_seed = plant_lorentzian(freqs, f0_seed, Q_seed)
-    for i, e in enumerate(electrodes):
-        mask = e_idx == i
-        if np.any(mask):
-            j = np.argmax(coh[mask])
-            sel = np.where(mask)[0][j]
-            denom = H_seed[sel] if abs(H_seed[sel]) > 1e-12 else 1.0
-            G0[i] = tf[sel] / denom
-    g0 = np.empty(2 * n_e)
-    g0[0::2] = G0.real
-    g0[1::2] = G0.imag
+        # --- Step 2: complex G via weighted linear solve ---
+        # Solve TF = G*H per electrode: G = Σ(w²·conj(H)·TF) / Σ(w²·|H|²)
+        H_fit = plant_lorentzian(freqs, f0_fit, Q_fit)
+        G_fit = np.zeros(n_e, dtype=complex)
+        for i in range(n_e):
+            mask = e_idx == i
+            if np.any(mask):
+                Hi = H_fit[mask]
+                TFi = tf[mask]
+                wi = w[mask]
+                denom = np.sum(wi ** 2 * np.abs(Hi) ** 2)
+                G_fit[i] = (np.sum(wi ** 2 * np.conj(Hi) * TFi) / denom
+                            if denom > 0 else 0.0)
 
-    if fit_plant:
+        model = G_fit[e_idx] * H_fit
+        residual = w * (model - tf)
+        res_norm = float(np.linalg.norm(np.concatenate([residual.real, residual.imag])))
+
+    elif fit_plant:
+        # --- "joint" or "dof_filtered": complex fit for f0, Q, G ---
+        def unpack(p):
+            return p[0], p[1], p[2:2 + 2 * n_e:2] + 1j * p[3:2 + 2 * n_e:2]
+
+        def residuals(p):
+            f0, Q, G = unpack(p)
+            model = G[e_idx] * plant_lorentzian(freqs, f0, Q)
+            r = w * (model - tf)
+            return np.concatenate([r.real, r.imag])
+
+        G0 = np.ones(n_e, dtype=complex)
+        H_seed = plant_lorentzian(freqs, f0_seed, Q_seed)
+        for i in range(n_e):
+            mask = e_idx == i
+            if np.any(mask):
+                j = np.argmax(coh[mask])
+                sel = np.where(mask)[0][j]
+                denom = H_seed[sel] if abs(H_seed[sel]) > 1e-12 else 1.0
+                G0[i] = tf[sel] / denom
+        g0 = np.empty(2 * n_e)
+        g0[0::2] = G0.real
+        g0[1::2] = G0.imag
+
         p0 = np.concatenate([[f0_seed, Q_seed], g0])
         lb = np.concatenate([[f0_seed * 0.8, Q_seed * 0.2], -np.inf * np.ones(2 * n_e)])
         ub = np.concatenate([[f0_seed * 1.2, Q_seed * 5.0], np.inf * np.ones(2 * n_e)])
         sol = sp_optimize.least_squares(residuals, p0, bounds=(lb, ub), method="trf")
-    else:
-        sol = sp_optimize.least_squares(residuals, g0, method="lm")
+        f0_fit, Q_fit, G_fit = unpack(sol.x)
+        res_norm = float(np.linalg.norm(sol.fun))
 
-    f0_fit, Q_fit, G_fit = unpack(sol.x)
+    else:
+        # --- fit_plant=False: G-only at fixed f0/Q (unchanged) ---
+        def residuals_g(p):
+            G = p[0::2] + 1j * p[1::2]
+            model = G[e_idx] * plant_lorentzian(freqs, f0_seed, Q_seed)
+            r = w * (model - tf)
+            return np.concatenate([r.real, r.imag])
+
+        G0 = np.ones(n_e, dtype=complex)
+        H_seed = plant_lorentzian(freqs, f0_seed, Q_seed)
+        for i in range(n_e):
+            mask = e_idx == i
+            if np.any(mask):
+                j = np.argmax(coh[mask])
+                sel = np.where(mask)[0][j]
+                denom = H_seed[sel] if abs(H_seed[sel]) > 1e-12 else 1.0
+                G0[i] = tf[sel] / denom
+        g0 = np.empty(2 * n_e)
+        g0[0::2] = G0.real
+        g0[1::2] = G0.imag
+
+        sol = sp_optimize.least_squares(residuals_g, g0, method="lm")
+        G_fit = sol.x[0::2] + 1j * sol.x[1::2]
+        f0_fit, Q_fit = f0_seed, Q_seed
+        res_norm = float(np.linalg.norm(sol.fun))
+
+    # per-electrode coherence from ALL records (for reporting)
+    all_coh = np.array([r["coh"][dof] for r in records], dtype=float)
+    all_e_idx = np.array([e_index[r["electrode"]] for r in records], dtype=int)
     per_e_coh = {}
     for i, e in enumerate(electrodes):
-        mask = e_idx == i
-        per_e_coh[e] = float(np.max(coh[mask])) if np.any(mask) else 0.0
+        mask = all_e_idx == i
+        per_e_coh[e] = float(np.max(all_coh[mask])) if np.any(mask) else 0.0
     return DofFit(dof=dof, f0=float(f0_fit), Q=float(Q_fit), gains=G_fit,
-                  fit_plant=fit_plant, residual_norm=float(np.linalg.norm(sol.fun)),
+                  fit_plant=fit_plant, residual_norm=res_norm,
                   per_electrode_coherence=per_e_coh)
 
 
@@ -1051,7 +1139,8 @@ def analyze_and_write(cfg: dict, records: list[dict], run_dir: Path,
     for d in dofs:
         dd = cfg["dofs"][d]
         dof_fits[d] = fit_dof(records, d, electrodes, float(dd["f0"]),
-                              float(dd["Q"]), bool(dd.get("fit_plant", True)))
+                              float(dd["Q"]), bool(dd.get("fit_plant", True)),
+                              str(dd.get("fit_strategy", "joint")))
     gain_matrix = assemble_gain_matrix(dof_fits, electrodes, dofs)
     h5 = write_hdf5(run_dir, gain_matrix, dof_fits, records, cfg_text, electrodes, dofs)
     write_report(run_dir, gain_matrix, dof_fits, electrodes, dofs)
