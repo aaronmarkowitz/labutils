@@ -1210,7 +1210,9 @@ def _resolve_capture_s(acfg: dict, key_n: str, key_s: str) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("config", help="Path to config YAML")
+    ap.add_argument("config", nargs="?", default=None,
+                    help="Path to config YAML (optional with --analyze; "
+                         "defaults to config embedded in capture file)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Build the plan/XML and print planned actions; touch no hardware")
     ap.add_argument("--premeasure-only", action="store_true",
@@ -1221,10 +1223,24 @@ def main() -> None:
                     help="Write the comb XML and launch diaggui on it to watch live; no analysis")
     ap.add_argument("--analyze", metavar="RAW_CAPTURE_H5", default=None,
                     help="Recompute the gain matrix offline from a saved raw_capture.h5; no hardware")
+    ap.add_argument("--reanalysis-label", default=None,
+                    help="Suffix for the reanalysis output dir, e.g. 'joint' -> reanalysis_joint/")
     ap.add_argument("--step01-h5", metavar="PATH", default=None,
                     help="Step 01 HDF5 to derive the active DOF list from (reads its 'dofs' attr)")
     ap.add_argument("--label", default=None, help="Override run_label")
     args = ap.parse_args()
+
+    if args.analyze and args.config is None:
+        import tempfile
+        with h5py.File(args.analyze, "r") as _f:
+            _yaml_text = str(_f.attrs["params_yaml"])
+        _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+        _tmp.write(_yaml_text)
+        _tmp.flush()
+        args.config = _tmp.name
+        print("--analyze: using config embedded in capture file")
+    elif not args.analyze and args.config is None:
+        ap.error("config argument is required for live measurement")
 
     cfg = load_config(Path(args.config))
     validate_config(cfg)
@@ -1243,7 +1259,9 @@ def main() -> None:
         cap_path = Path(args.analyze)
         captured, fs, tones, _ = load_raw_capture(cap_path)
         records = compute_tfs(captured, fs, tones, cfg, active_dofs=active_dofs)
-        run_dir = cap_path.resolve().parent / "reanalysis"
+        reanalysis_name = (f"reanalysis_{args.reanalysis_label}"
+                           if args.reanalysis_label else "reanalysis")
+        run_dir = cap_path.resolve().parent / reanalysis_name
         run_dir.mkdir(exist_ok=True)
         print(f"Re-analyzing {cap_path} -> {run_dir}")
         plots_dir = _resolve_plots_dir(cfg, run_dir, label=None)
