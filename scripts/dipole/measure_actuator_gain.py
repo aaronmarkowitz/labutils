@@ -935,7 +935,9 @@ def fit_dof(records: list[dict], dof: str, electrodes: list[str],
         f0_fit, Q_fit = float(sol_mag.x[0]), float(sol_mag.x[1])
 
         # --- Step 2: complex G via weighted linear solve ---
-        # Solve TF = G*H per electrode: G = Σ(w²·conj(H)·TF) / Σ(w²·|H|²)
+        # Phase from linear solve: G_phase = Σ(w²·conj(H)·TF) / Σ(w²·|H|²)
+        # Magnitude from step 1 (immune to phase corruption): |G| = sol_mag.x[2+i]
+        # Combining them preserves the robust magnitude while extracting phase.
         H_fit = plant_lorentzian(freqs, f0_fit, Q_fit)
         G_fit = np.zeros(n_e, dtype=complex)
         for i in range(n_e):
@@ -945,8 +947,9 @@ def fit_dof(records: list[dict], dof: str, electrodes: list[str],
                 TFi = tf[mask]
                 wi = w[mask]
                 denom = np.sum(wi ** 2 * np.abs(Hi) ** 2)
-                G_fit[i] = (np.sum(wi ** 2 * np.conj(Hi) * TFi) / denom
-                            if denom > 0 else 0.0)
+                G_phase = (np.sum(wi ** 2 * np.conj(Hi) * TFi) / denom
+                           if denom > 0 else 1.0)
+                G_fit[i] = sol_mag.x[2 + i] * np.exp(1j * np.angle(G_phase))
 
         model = G_fit[e_idx] * H_fit
         residual = w * (model - tf)
