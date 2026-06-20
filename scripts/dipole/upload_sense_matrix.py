@@ -113,6 +113,7 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
                 value = float(W[w_row, w_col])
                 ch_name = channel_names[w_col]
             else:
+                w_col = None
                 value = 0.0
                 ch_name = None
             entries.append({
@@ -123,6 +124,10 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
                 "col_label": col_cfg["label"],
                 "mode": mode,
                 "ch_name": ch_name,
+                "w_row": w_row,
+                "w_col": w_col,
+                "sense_row": sense_row,
+                "sense_col": sense_col,
             })
 
     return entries, skipped_rows
@@ -340,8 +345,8 @@ def main() -> None:
 
     prefix = f"DRY RUN — " if args.dry_run else ""
     print(f"  {prefix}Writing {len(entries)} SENSE element(s)  (TRAMP={args.tramp:.1f} s):")
-    print(f"  {'Channel':<40} {'Value':>14}  {'SW1(in)':>10}  {'SW2(out)':>10}")
-    print(f"  {'-'*40} {'-'*14}  {'-'*10}  {'-'*10}")
+    print(f"  {'Channel':<40} {'Value':>14}  {'SW1(in)':>10}  {'SW2(out)':>10}  Mapping")
+    print(f"  {'-'*40} {'-'*14}  {'-'*10}  {'-'*10}  {'-'*32}")
     for e in entries:
         sw = sw_states[e["base"]]
         if args.dry_run:
@@ -350,10 +355,15 @@ def main() -> None:
         else:
             sw1_str = "already on" if sw["input_on"] else "will enable"
             sw2_str = "already on" if sw["output_on"] else "will enable"
+        if e["w_col"] is not None:
+            mapping = (f"W[{e['w_row']},{e['w_col']}] ({e['row_label']}<-{e['col_label']})"
+                       f" → SENSE[{e['sense_row']},{e['sense_col']}]")
+        else:
+            mapping = (f"W[{e['w_row']},—] ({e['row_label']}<-{e['col_label']} not in diag)"
+                       f" → SENSE[{e['sense_row']},{e['sense_col']}] = 0")
         print(
             f"  {e['epics_channel']:<40} {e['value']:>14.6f}"
-            f"  {sw1_str:>10}  {sw2_str:>10}"
-            f"  ({e['row_label']} <- {e['col_label']})"
+            f"  {sw1_str:>10}  {sw2_str:>10}  {mapping}"
         )
     print()
 

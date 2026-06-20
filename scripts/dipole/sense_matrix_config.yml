@@ -33,3 +33,4 @@ cols:
   - {index: 4, label: "LZ_PIT", channel_suffix: "LESZ_PIT"}
   - {index: 5, label: "LZ_YAW", channel_suffix: "LESZ_YAW"}
   - {index: 6, label: "LZ_SUM", channel_suffix: "LESZ_SUM"}
+  - {index: 7, label: "PBSZ",   channel_suffix: "PBSZ"}
