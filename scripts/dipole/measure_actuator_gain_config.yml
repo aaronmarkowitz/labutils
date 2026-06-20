@@ -11,6 +11,7 @@
 # reads the 'dofs' attribute from this file to determine which DOFs to measure.
 # CLI --step01-h5 overrides this. If neither is set, all DOFs in the 'dofs:'
 # section below are used.
+
 # step01_results_h5: "/path/to/step_01_sensor_diagonalization_results.h5"
 
 prefix: "Y1:DMD"
@@ -85,17 +86,17 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 200         # hard cap per tone. DAC is 16-bit signed (+/-32768).
-  initial_amplitude_counts: 150      # start very conservative; trim loop raises as needed
+  max_amplitude_counts: 100         # hard cap per tone. DAC is 16-bit signed (+/-32768).
+  initial_amplitude_counts: 10      # start very conservative; trim loop raises as needed
   amp_step_factor: 3.0             # multiplicative increase per amplitude trim step
 
 schroeder:
   enabled: true   # phase the tones on each electrode to minimize crest factor
 
 trim:
-  target_coherence: 0.9
-  max_trim_iters: 1
-  segment_s_max: 24.0   # double segment_s each step (12->24 s) before raising amplitude
+  target_coherence: 0.5
+  max_trim_iters: 5
+  segment_s_max: 10   # double segment_s each step (12->24 s) before raising amplitude
                          # longer segments -> narrower FFT bins -> better SNR per bin -> higher coherence
 
 diag:
@@ -111,8 +112,8 @@ diag:
   # max(min_time, n_cycles/freq) -- seconds floor at low freq, cycles floor at high.
   # We set min_time long enough to cover the NDS2 capture window below.
   template_xml: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data/260611/actuators_sineResponse_template.xml"
-  premeasure: {min_time_s: 12.0, cycles: 10, settling_frac: 0.1}
-  measure:    {min_time_s: 28.0, cycles: 10, settling_frac: 0.1}
+  premeasure: {min_time_s: 10.0, cycles: 10, settling_frac: 0.1}
+  measure:    {min_time_s: 10.0, cycles: 10, settling_frac: 0.1}
   rampup_s: 1.0
   rampdown_s: 1.0      # graceful excitation ramp-down on NORMAL completion
   average_type: 0      # 0 = fixed (deterministic count); terminates promptly
