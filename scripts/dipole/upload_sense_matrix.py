@@ -91,7 +91,7 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
     # e.g. "Y1:DMD-LESZ_YAW_IN1" -> "LESZ_YAW"
     ch_suffix_to_w_col = {}
     for w_col_idx, ch_name in enumerate(channel_names):
-        stripped = ch_name.replace(f"{prefix}-", "").removesuffix("_IN1")
+        stripped = ch_name.replace(f"{prefix}-", "").removesuffix("_DQ").removesuffix("_IN1")
         ch_suffix_to_w_col[stripped] = w_col_idx
 
     entries = []

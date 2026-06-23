@@ -12,10 +12,10 @@
 # CLI --step01-h5 overrides this. If neither is set, all DOFs in the 'dofs:'
 # section below are used.
 
-# step01_results_h5: "/path/to/step_01_sensor_diagonalization_results.h5"
+step01_results_h5: "$MQG_DROPBOX_PATH/worker1/data/260617/20260617_094654/01_SensorDiagonalization/step_01_sensor_diagonalization_results.h5"
 
 prefix: "Y1:DMD"
-electrodes: ["E1"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
+electrodes: ["E4"]   # -> Y1:DMD-POLES_E{n}_EXC (excitation rows)
 
 # Particle DOF readback channels + resonance seeds + per-DOF tone density.
 #   n_tones MUST be >= number of electrodes so every electrode is driven near
@@ -180,7 +180,7 @@ abort:
   sentinel_path: "/tmp/abort_actuator_gain"
 
 output_root: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data"
-run_label: "actgain"
+run_label: "actgain_E4_5p6e-2mbar"
 
 # Optional: override plot output root. If unset (or null), plots go to
 # <run_dir>/plots/ (final) and <run_dir>/plots/trim_NN/ (trim steps).

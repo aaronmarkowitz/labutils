@@ -763,7 +763,9 @@ def inject_and_capture(cfg: dict, tones: list[Tone], meas: dict, run_dir: Path,
 
     Returns (captured: {channel: np.ndarray}, fs: float, result_xml: Path).
     """
-    timeout_s = max(float(cfg["diag"]["diag_timeout_s"]), meas["min_time_s"] + 60)
+    settling_frac = meas.get("settling_frac", 0.1)
+    timeout_s = max(float(cfg["diag"]["diag_timeout_s"]),
+                    meas["min_time_s"] * (1 + settling_frac) + 90)
 
     gen_xml = run_dir / f"gen_{label}.xml"
     gen_xml.write_text(build_sine_response_xml(cfg, tones, meas,
