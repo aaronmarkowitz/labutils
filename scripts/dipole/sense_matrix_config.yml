@@ -11,6 +11,24 @@
 # EPICS channel pattern: Y1:DMD-SENSE_{row}_{col}_GAIN  (1-indexed)
 # Physical dimensions: 5 outputs (rows) x 6 inputs (cols)
 # Note: a 7th column slot exists in the ADL files but is a spare unconnected input.
+#
+# DIRECTIONAL ROWS
+# ----------------
+# Each row reads out the particle's motion along a DIRECTION in DOF space. The
+# coefficients written to that row are  n . W , where n is the (unit) direction
+# vector and W is the step-01 demodulation matrix (rows = DOFs, cols = sensor
+# channels). A row may specify its direction in any one of these ways (shared
+# coordinate convention with the ACTS uploader, see utility.py):
+#     mode: "x"|"y"|"z"            axis shorthand (back-compatible)
+#     angle_deg: <deg>            in-plane azimuth, from +x toward +y
+#     elevation_deg / azimuth_deg full sphere (elevation above the x-y plane):
+#                                 n = [cos(el)cos(az), cos(el)sin(az), sin(el)]
+#     vector: [x, y, z]           explicit components (normalized)
+# Sign flip: add 180 to azimuth_deg/angle_deg (e.g. 45 vs 225) flips the sign.
+# A row that needs a DOF not present in this diagonalization's W:
+#   - pure axis shorthand (e.g. ZERR mode:z on an x,y-only run) is skipped and
+#     keeps its previous values; an explicit angle/vector that points out of the
+#     measured DOF subspace raises an error instead.
 
 prefix: "Y1:DMD"
 matrix_name: "SENSE"
@@ -22,6 +40,12 @@ rows:
   - {index: 3, label: "ZERR",  mode: "z"}   # -> PARTICLE_Z
   # row 4 (SIG / charge lock-in input) and row 5 (spins / PLL) are not
   # populated by sensor diagonalization — those rows are left untouched.
+  #
+  # DIRECTIONAL EXAMPLES (uncomment / adapt; reuse a spare row index):
+  #   - {index: 4, label: "DIAG45",  angle_deg: 45}            # 45 deg in x-y
+  #   - {index: 4, label: "DIAG225", angle_deg: 225}           # opposite sign
+  #   - {index: 5, label: "SKEW",    elevation_deg: 45, azimuth_deg: 60}
+  #   - {index: 5, label: "CUSTOM",  vector: [1, 1, 0.5]}
 
 # Input columns (upstream of the matrix, from LES filter module outputs)
 # channel_suffix is the part of the EPICS channel name after "Y1:DMD-", e.g.
