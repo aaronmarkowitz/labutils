@@ -35,7 +35,34 @@ Caveat (from the experimentalist): z couplings are expected to be smaller than
 x,y, so achieving a given z field needs larger electrode voltages — at which point
 x,y crosstalk can appear unless the actuation TFs are well characterized.
 
-## 3. Possible refinements
+## 3. Calibrate the ACTS input to physical field units (V/m)
+
+`upload_actuation_matrix.py` already anchors `gain=1` to a *reproducible* field via
+`field_anchor` (default `self_norm`/`frobenius`): after χ removal `A_field = c·B`, with
+`B` the field-per-count matrix (electrode geometry only) and `c = cal·q/(4π²m)` a single
+particle-dependent global scalar that the anchor divides out. So the written matrix is
+`B̂ = B/‖B‖_F` — pure electrode geometry, particle-independent.
+
+To make `gain=1` mean **exactly 1 V/m**, set `field_anchor.physical_scale = P = ‖B‖_F`.
+The plan to obtain `‖B‖_F`:
+
+1. Iterate the COMSOL trap-geometry model until its field-per-count *shape* `B̂_COMSOL`
+   matches the lab-measured `B̂` (up to global scale). The geometric mismodeling that
+   plagued the old approach (++-- not producing a pure y-field, +--+ not a pure x-field,
+   from imperfect electrode locations) lives entirely in the *shape* `B̂` — which the lab
+   actuator-gain measurement now supplies directly. So COMSOL's only remaining job is to
+   provide the one magnitude `‖B‖_F` (= `dac_to_volts · comsol_E_per_volt · geometry
+   factor`).
+2. Evaluate the field along a chosen direction in both COMSOL and the Frobenius-normalized
+   matrix, compare, and supply the resulting `P = ‖B‖_F` as `physical_scale` (with
+   `mode: physical`). Realized `|F| = gain · ‖B‖_F / P`.
+
+Hardware constants live in `dipole_pipeline/parameters_*.yml`
+(`dac_to_volts`, `comsol_E_per_volt`); per-particle `mass_kg`/`adc_to_meters` are in that
+pipeline's `results.yml` / step-03/04 HDF5 — none are needed for the anchor itself, only
+to interpret `c` if ever desired.
+
+## 4. Possible refinements
 
 - The field-normalization uncertainty currently treats `residual_norm_{dof}` as a
   fit-quality weight proxy, not a rigorous per-mode γ variance, and reports the

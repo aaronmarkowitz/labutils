@@ -275,6 +275,17 @@ own file's γ**, which corrects cross-run pressure drift. Modes: `common_gamma` 
 (with a spread warning), A, A_field with per-element uncertainties, condition number, and
 per-column electrode coefficients with propagated uncertainties.
 
+**Global field anchor (`gain=1` is reproducible).** After χ removal,
+`A_field = c·B`, where `B` is the field-per-count matrix (electrode geometry only) and
+`c = cal·q/(4π²m)` is a *single global scalar* that changes particle-to-particle (but
+**not** with pressure/Q — `A∝χ` and `s_d∝1/χ` cancel). `field_anchor` divides `A_field`
+by a degree-1 functional (`frobenius` default, also `sigma_max`/`reference_column`), which
+cancels `c` exactly, so the written matrix depends **only on the electrodes** — `gain=1`
+produces the same field whenever the electrodes are unchanged. `gain` stays the
+after-the-fact rescaling knob. `physical_scale` `P` (default 1.0) is the future V/m hook:
+set `P = ‖B‖_F` (from a COMSOL model iterated to match the measured `B` shape) and `gain=1`
+→ 1 V/m; realized `|F| = gain·‖B‖_F/P`. `mode: none` restores the old drift-prone behaviour.
+
 **Reductions & safety.** Complex gains → real via **signed magnitude** `|G|·sign(cos φ)`
 (warns when φ is near ±90°). Only electrode rows 1–4 of *coupled* columns are written;
 laser rows are never touched. Uncoupled columns are left untouched unless `clear: true`

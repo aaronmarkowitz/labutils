@@ -88,6 +88,28 @@ field_normalize: "common_gamma"
 # (undermines the gas-dominated common-gamma assumption for that file).
 gamma_spread_warn: 0.20
 
+# --- Global field anchor (fixes the magnitude unit of gain=1) --------------
+# field_normalize (above) removes the per-DOF susceptibility chi(omega0), which
+# leaves A_field = c * B: B[d,e] = field-per-count (electrode geometry only) and
+# c = cal*q/(4pi^2 m) is a SINGLE global scalar that changes particle-to-particle
+# (but NOT with pressure/Q -- A ~ chi and s_d ~ 1/chi cancel). Dividing A_field
+# by any degree-1 functional cancels c, so the written matrix depends ONLY on the
+# electrodes => gain=1 produces the same field whenever the electrodes are
+# unchanged. gain remains the after-the-fact rescaling knob.
+field_anchor:
+  mode: "self_norm"          # none | self_norm | physical
+                             #   none      = old behaviour (gain=1 NOT reproducible)
+                             #   self_norm = divide by the functional below
+                             #   physical  = same, with physical_scale set to ||B||_F
+  functional: "frobenius"    # frobenius (default; RMS over all cells, most robust
+                             #   to single-cell noise) | sigma_max | reference_column
+  # reference_electrode: "E1"  # only used when functional: reference_column
+  physical_scale: 1.0        # P. Leave 1.0 for an arbitrary-but-fixed electrode
+                             # unit. FUTURE: set to ||B||_F (= comsol_E_per_volt *
+                             # dac_to_volts * COMSOL geometry factor, from a model
+                             # iterated to match the measured B shape) so gain=1
+                             # = 1 V/m. Realized |F| = gain * ||B||_F / P.
+
 # Warn if any (dof,electrode) cell feeding the inversion has coherence below:
 low_coherence_warn: 0.30
 

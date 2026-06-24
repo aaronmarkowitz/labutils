@@ -171,6 +171,59 @@ def test_field_normalize_ratio_within_file():
 
 
 # --------------------------------------------------------------------------- #
+# global field anchor (fixes the magnitude unit of gain=1)
+# --------------------------------------------------------------------------- #
+def test_anchor_scale_frobenius():
+    assert math.isclose(uam.anchor_scale(A_TRUE, "frobenius"),
+                        float(np.linalg.norm(A_TRUE)))
+
+
+def test_anchor_scale_sigma_max():
+    assert math.isclose(uam.anchor_scale(A_TRUE, "sigma_max"),
+                        float(np.linalg.svd(A_TRUE, compute_uv=False)[0]))
+
+
+def test_anchor_scale_reference_column():
+    assert math.isclose(uam.anchor_scale(A_TRUE, "reference_column", ref_col=1),
+                        float(np.linalg.norm(A_TRUE[:, 1])))
+    with pytest.raises(ValueError, match="out of range"):
+        uam.anchor_scale(A_TRUE, "reference_column", ref_col=9)
+
+
+def test_anchor_scale_unknown_functional_raises():
+    with pytest.raises(ValueError, match="unknown anchor functional"):
+        uam.anchor_scale(A_TRUE, "bogus")
+
+
+def test_anchor_scale_degenerate_returns_one():
+    assert uam.anchor_scale(np.zeros((2, 4)), "frobenius") == 1.0
+    assert uam.anchor_scale(np.zeros((2, 4)), "sigma_max") == 1.0
+
+
+@pytest.mark.parametrize("functional", ["frobenius", "sigma_max"])
+def test_anchor_invariance_under_global_scalar(functional):
+    # THE core property: A_field and k*A_field (different particle's global c)
+    # give the SAME anchored matrix, so written GAINs are particle-independent.
+    k = 7.3
+    a1 = A_TRUE / uam.anchor_scale(A_TRUE, functional)
+    a2 = (k * A_TRUE) / uam.anchor_scale(k * A_TRUE, functional)
+    assert np.allclose(a1, a2)
+
+
+def test_anchor_preserves_direction_scales_magnitude():
+    # Anchoring scales electrode counts but not the realized field direction.
+    anchored = A_TRUE / uam.anchor_scale(A_TRUE, "frobenius")
+    u = np.array([1.0, 0.0])
+    v_raw = uam.column_electrode_values(np.linalg.pinv(A_TRUE), u, 1.0)
+    v_anc = uam.column_electrode_values(np.linalg.pinv(anchored), u, 1.0)
+    # same direction in electrode space (parallel count vectors)
+    assert np.allclose(v_anc / np.linalg.norm(v_anc),
+                       v_raw / np.linalg.norm(v_raw), atol=1e-9)
+    # realized field still points along u for both
+    assert np.allclose(anchored @ v_anc, u, atol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
 # inversion / column values
 # --------------------------------------------------------------------------- #
 def test_unit_response_inversion():
@@ -321,6 +374,79 @@ def test_assemble_end_to_end(tmp_path):
     xctl = next(p for p in res["plans"] if p.label == "XCTL")
     v = np.array([xctl.electrode_values[e] for e in ["E1", "E2", "E3", "E4"]])
     assert np.allclose(res["A_field"] @ v, [1, 0], atol=1e-9)
+    # anchor metadata present; default self_norm/frobenius applied
+    assert res["anchor_mode"] == "self_norm"
+    assert res["anchor_functional"] == "frobenius"
+    assert res["anchor"] > 0
+
+
+def _assemble_cfg(tmp_path, gains_by_elec, f0, Q, field_anchor=None):
+    data = []
+    for j in range(4):
+        e = f"E{j+1}"
+        p = tmp_path / f"{e}.h5"
+        _write_result_h5(p, e, ["x", "y"], gains_by_elec[:, j:j+1], f0, Q)
+        data.append({"electrode": e, "path": str(p)})
+    cfg = {
+        "prefix": "Y1:DMD",
+        "electrode_row": {"E1": 1, "E2": 2, "E3": 3, "E4": 4},
+        "electrodes": ["E1", "E2", "E3", "E4"],
+        "dofs": ["x", "y"],
+        "data": data,
+        "field_normalize": "common_gamma",
+        "columns": [{"index": 1, "label": "XCTL", "coupled": True, "angle_deg": 0}],
+    }
+    if field_anchor is not None:
+        cfg["field_anchor"] = field_anchor
+    return cfg
+
+
+def test_assemble_anchor_makes_gains_particle_independent(tmp_path):
+    # Two "particles": identical electrodes (same B) but a global scalar k between
+    # them (different cal*q/m). With self_norm, the written GAINs must match.
+    f0 = {"x": 41.0, "y": 56.0}
+    Q = {"x": 18.0, "y": 18.0}
+    k = 4.2
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    cfg_a = _assemble_cfg(tmp_path / "a", A_TRUE, f0, Q)
+    cfg_b = _assemble_cfg(tmp_path / "b", k * A_TRUE, f0, Q)
+    res_a = uam.assemble(cfg_a)
+    res_b = uam.assemble(cfg_b)
+    va = res_a["plans"][0].electrode_values
+    vb = res_b["plans"][0].electrode_values
+    for e in ["E1", "E2", "E3", "E4"]:
+        assert math.isclose(va[e], vb[e], rel_tol=1e-9, abs_tol=1e-12)
+
+
+def test_assemble_anchor_none_is_drift_prone(tmp_path):
+    # mode: none reproduces the old behaviour -> a global scalar k DOES change
+    # the written GAINs (regression guard for the new default's effect).
+    f0 = {"x": 41.0, "y": 56.0}
+    Q = {"x": 18.0, "y": 18.0}
+    k = 4.2
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    cfg_a = _assemble_cfg(tmp_path / "a", A_TRUE, f0, Q, field_anchor={"mode": "none"})
+    cfg_b = _assemble_cfg(tmp_path / "b", k * A_TRUE, f0, Q, field_anchor={"mode": "none"})
+    va = uam.assemble(cfg_a)["plans"][0].electrode_values
+    vb = uam.assemble(cfg_b)["plans"][0].electrode_values
+    # counts scale ~1/k between the two -> NOT equal
+    assert not math.isclose(va["E1"], vb["E1"], rel_tol=1e-6)
+
+
+def test_assemble_physical_scale_scales_counts(tmp_path):
+    # physical_scale P scales electrode counts linearly vs self_norm (P=1).
+    f0 = {"x": 41.0, "y": 56.0}
+    Q = {"x": 18.0, "y": 18.0}
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    cfg1 = _assemble_cfg(tmp_path / "a", A_TRUE, f0, Q,
+                         field_anchor={"mode": "self_norm", "physical_scale": 1.0})
+    cfg2 = _assemble_cfg(tmp_path / "b", A_TRUE, f0, Q,
+                         field_anchor={"mode": "physical", "physical_scale": 10.0})
+    v1 = uam.assemble(cfg1)["plans"][0].electrode_values
+    v2 = uam.assemble(cfg2)["plans"][0].electrode_values
+    # A_field scales by P -> pinv scales by 1/P -> counts scale by 1/P
+    for e in ["E1", "E2", "E3", "E4"]:
+        assert math.isclose(v2[e], v1[e] / 10.0, rel_tol=1e-9, abs_tol=1e-12)
 
 
 def test_electrode_cross_check_mismatch_raises(tmp_path):

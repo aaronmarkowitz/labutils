@@ -184,6 +184,42 @@ def field_scale_factors(fg: FileGains, mode: str) -> dict[str, float]:
     raise ValueError(f"unknown field_normalize mode {mode!r}")
 
 
+def anchor_scale(A_field: np.ndarray, functional: str = "frobenius",
+                 ref_col: int = 0) -> float:
+    """Degree-1 functional N(A_field) whose division fixes the magnitude unit.
+
+    field_normalize removes the per-DOF susceptibility chi(omega0), leaving
+    A_field = c * B, where B[d,e] is the field-per-count matrix (electrode
+    geometry only) and c = cal*q/(4pi^2 m) is a SINGLE global scalar that changes
+    particle-to-particle (but NOT with pressure/Q -- A ~ chi and s_d ~ 1/chi
+    cancel). Any degree-1 functional obeys N(A_field) = c * N(B), so
+    A_field / N(A_field) = B / N(B) depends ONLY on the electrodes. Hence
+    gain=1 produces a reproducible field whenever the electrodes are unchanged.
+
+      "frobenius"        -> ||A_field||_F   (default; RMS over all cells, most
+                            robust to single-cell measurement noise)
+      "sigma_max"        -> largest singular value (conditioning-aware)
+      "reference_column" -> ||A_field[:, ref_col]||_2  (one electrode's column)
+
+    Returns 1.0 (no-op) for a degenerate (~zero) matrix so callers never divide
+    by zero.
+    """
+    if functional == "frobenius":
+        N = float(np.linalg.norm(A_field))
+    elif functional == "sigma_max":
+        N = float(np.linalg.svd(A_field, compute_uv=False)[0])
+    elif functional == "reference_column":
+        if not (0 <= ref_col < A_field.shape[1]):
+            raise ValueError(f"reference_column index {ref_col} out of range "
+                             f"[0, {A_field.shape[1]})")
+        N = float(np.linalg.norm(A_field[:, ref_col]))
+    else:
+        raise ValueError(f"unknown anchor functional {functional!r}")
+    if not np.isfinite(N) or N < 1e-300:
+        return 1.0
+    return N
+
+
 def gain_rel_error(coherence: float, n_avg: int) -> float:
     """Relative 1-sigma error on a transfer-function magnitude (H1 estimator).
 
@@ -402,13 +438,24 @@ def plan_columns(cfg: dict, A_pinv: np.ndarray, dof_order: list[str],
 # Output / reporting
 # --------------------------------------------------------------------------- #
 def print_diagnostics(file_gains, A, A_field, A_sigma, A_pinv, dof_order, elec_order,
-                      s_lookup, cells, cfg, plans):
+                      s_lookup, cells, cfg, plans, res):
     print("=" * 74)
     print("  ACTS actuation-matrix inversion")
     print("=" * 74)
     print(f"  DOFs (rows):       {dof_order}")
     print(f"  Electrodes (cols): {elec_order}")
     print(f"  field_normalize:   {cfg.get('field_normalize', 'common_gamma')}")
+    amode = res["anchor_mode"]
+    if amode == "none":
+        print("  field_anchor:      none (gain=1 NOT reproducible across particles)")
+    else:
+        print(f"  field_anchor:      {amode} ({res['anchor_functional']})  "
+              f"N(A_field)={res['anchor_N']:.4g}  P={res['anchor_P']:g}  "
+              f"-> scale x{res['anchor']:.4g}")
+        print("  unit note:         gain=1 -> reproducible field of magnitude "
+              "P/||B||_F per unit direction")
+        print("                     (P=1 => arbitrary-but-fixed electrode unit; "
+              "set P=||B||_F for 1 V/m)")
     print()
     print("  Source files (fitted plant + pooled damping rate):")
     spread_warn = float(cfg.get("gamma_spread_warn", 0.20))
@@ -591,6 +638,28 @@ def assemble(cfg: dict):
 
     A_field, s_lookup = apply_field_normalization(A, dof_order, elec_order, cells,
                                                   file_gains, mode)
+
+    # Global field anchor: divide out the single particle-dependent global scalar
+    # c (= cal*q/4pi^2 m) left over after susceptibility removal, so gain=1 is a
+    # fixed, reproducible field whenever the electrodes are unchanged. See
+    # anchor_scale() for the math. physical_scale P (default 1.0) is the future
+    # V/m hook: set P = ||B||_F (from a geometry-matched COMSOL model) and gain=1
+    # -> 1 V/m; realized |F| = gain * ||B||_F / P.
+    anchor_cfg = cfg.get("field_anchor", {}) or {}
+    anchor_mode = anchor_cfg.get("mode", "self_norm")     # none | self_norm | physical
+    functional = anchor_cfg.get("functional", "frobenius")
+    P = float(anchor_cfg.get("physical_scale", 1.0))
+    if anchor_mode == "none":
+        anchor_N, anchor = 1.0, 1.0
+    elif anchor_mode in ("self_norm", "physical"):
+        ref_label = anchor_cfg.get("reference_electrode")
+        ref_idx = elec_order.index(ref_label) if ref_label else 0
+        anchor_N = anchor_scale(A_field, functional, ref_idx)
+        anchor = P / anchor_N
+    else:
+        raise ValueError(f"unknown field_anchor mode {anchor_mode!r}")
+    A_field = A_field * anchor
+
     A_pinv = np.linalg.pinv(A_field)
 
     # Cell sigma (relative) for uncertainty propagation.
@@ -600,6 +669,8 @@ def assemble(cfg: dict):
         rel = gain_rel_error(c.coherence, n_avg) if np.isfinite(c.coherence) else 0.0
         cell_sigma[(d, e)] = rel
 
+    # A_sigma from the anchored A_field: relative errors are scale-invariant, so
+    # only the absolute sigma rescales with the anchor (consistent with A_field).
     A_sigma = afield_abs_sigma(A_field, dof_order, elec_order, cells, file_gains,
                                cell_sigma, mode)
 
@@ -612,6 +683,8 @@ def assemble(cfg: dict):
         "A": A, "A_field": A_field, "A_sigma": A_sigma, "A_pinv": A_pinv,
         "s_lookup": s_lookup, "cells": cells, "cell_sigma": cell_sigma,
         "plans": plans, "mode": mode,
+        "anchor_mode": anchor_mode, "anchor_functional": functional,
+        "anchor_N": anchor_N, "anchor": anchor, "anchor_P": P,
     }
 
 
@@ -648,7 +721,7 @@ def main() -> None:
 
     print_diagnostics(res["file_gains"], res["A"], res["A_field"], res["A_sigma"],
                       res["A_pinv"], res["dof_order"], res["elec_order"],
-                      res["s_lookup"], res["cells"], cfg, res["plans"])
+                      res["s_lookup"], res["cells"], cfg, res["plans"], res)
     print_column_plan(res["plans"], res["dof_order"], res["A_field"], res["elec_order"])
 
     prefix = "DRY RUN -- " if args.dry_run else ""
