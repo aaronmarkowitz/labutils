@@ -39,6 +39,9 @@ import h5py
 import numpy as np
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import utility as ucoord  # noqa: E402  (shared coordinate system)
+
 # Filter module switch bit masks (CDS cdsFilt convention)
 _SW1_INPUT_ON_BIT = 4       # bit 2 of SW1 register: input ON/OFF
 _SW2_OUTPUT_ON_BIT = 1024   # bit 10 of SW2 register: output ON/OFF
@@ -73,22 +76,58 @@ def load_hdf5(hdf5_path: Path) -> dict:
     }
 
 
+def _row_is_pure_mode(row_cfg: dict) -> bool:
+    """True if the row uses ONLY the axis shorthand (mode/axis), no direction spec."""
+    direction_keys = {"angle_deg", "elevation_deg", "azimuth_deg", "vector"}
+    return not (direction_keys & set(row_cfg.keys()))
+
+
+def row_direction_vector(row_cfg: dict, dofs: list[str]) -> tuple[np.ndarray, str]:
+    """Return (n, descr): the DOF-space unit vector for a SENSE row and a label.
+
+    Accepts the same direction grammar as the ACTS uploader (shared utility):
+    axis shorthand (mode/axis: x|y|z), angle_deg (in-plane), elevation_deg+
+    azimuth_deg (full sphere), or explicit vector. The returned ``n`` has length
+    len(dofs); the row's coefficients are ``n @ W`` (i.e. the linear combination
+    of DOF readouts pointing along that direction).
+    """
+    u3 = ucoord.direction_unit_vector(row_cfg)
+    n = ucoord.select_dofs(u3, dofs)
+    if "vector" in row_cfg:
+        descr = f"vector{np.round(u3, 3).tolist()}"
+    elif "elevation_deg" in row_cfg or "azimuth_deg" in row_cfg:
+        descr = f"el={row_cfg.get('elevation_deg', 0)},az={row_cfg.get('azimuth_deg', 0)}"
+    elif "angle_deg" in row_cfg:
+        descr = f"{row_cfg['angle_deg']}deg(xy)"
+    else:
+        descr = str(row_cfg.get("mode", row_cfg.get("axis")))
+    return n, descr
+
+
 def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
     """Return (entries, skipped_rows).
 
-    entries: list of {base, epics_channel, value, row_label, col_label, mode, ch_name}
-    skipped_rows: list of row configs whose mode is not in hdf5["dofs"]
+    Each SENSE row specifies a *direction* in DOF space (see row_direction_vector).
+    The element written to SENSE[row, col] is the projection of the demodulation
+    matrix onto that direction for the sensor channel feeding ``col``:
+        value = sum_k n[k] * W[k, w_col]   ==  (n @ W)[w_col]
+    A pure-axis row (mode: x) reduces to W[row_x, w_col] -- so existing configs
+    are unchanged.
+
+    entries: list of {base, epics_channel, value, row_label, col_label, ...}
+    skipped_rows: rows whose pure-axis mode is absent from hdf5["dofs"]
+                  (their SENSE elements retain previous values). An EXPLICIT
+                  direction requesting an absent DOF raises instead of skipping.
     """
     W = hdf5["W"]  # (K, N)
     channel_names = hdf5["channel_names"]
     dofs = hdf5["dofs"]
     prefix = config["prefix"]
     mat = config["matrix_name"]
+    subspace_tol = float(config.get("subspace_tol", 1e-6))
 
-    mode_to_w_row = {m: i for i, m in enumerate(dofs)}
-
-    # Map channel_suffix -> W column index via _IN1 channel name stripping
-    # e.g. "Y1:DMD-LESZ_YAW_IN1" -> "LESZ_YAW"
+    # Map channel_suffix -> W column index via _IN1/_DQ channel name stripping
+    # e.g. "Y1:DMD-LESZ_YAW_IN1_DQ" -> "LESZ_YAW"
     ch_suffix_to_w_col = {}
     for w_col_idx, ch_name in enumerate(channel_names):
         stripped = ch_name.replace(f"{prefix}-", "").removesuffix("_DQ").removesuffix("_IN1")
@@ -97,11 +136,20 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
     entries = []
     skipped_rows = []
     for row_cfg in config["rows"]:
-        mode = row_cfg["mode"]
-        if mode not in mode_to_w_row:
-            skipped_rows.append(row_cfg)
-            continue
-        w_row = mode_to_w_row[mode]
+        u3 = ucoord.direction_unit_vector(row_cfg)
+        rem = ucoord.out_of_subspace_fraction(u3, dofs)
+        if rem > subspace_tol:
+            # Direction has content outside the measured DOFs.
+            if _row_is_pure_mode(row_cfg):
+                # Back-compat: a pure axis (e.g. ZERR mode:z) absent from this
+                # diagonalization is simply skipped; its row retains old values.
+                skipped_rows.append(row_cfg)
+                continue
+            raise ValueError(
+                f"SENSE row {row_cfg.get('index')} ({row_cfg.get('label')}) requests a "
+                f"direction with {rem*100:.1f}% outside the measured DOFs {dofs}; "
+                f"cannot realize. Re-run step 01 over the needed DOFs or change the row.")
+        n, descr = row_direction_vector(row_cfg, dofs)
         sense_row = row_cfg["index"]
 
         for col_cfg in config["cols"]:
@@ -110,7 +158,7 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
             base = f"{prefix}-{mat}_{sense_row}_{sense_col}"
             if suffix in ch_suffix_to_w_col:
                 w_col = ch_suffix_to_w_col[suffix]
-                value = float(W[w_row, w_col])
+                value = float(n @ W[:, w_col])
                 ch_name = channel_names[w_col]
             else:
                 w_col = None
@@ -122,9 +170,9 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
                 "value": value,
                 "row_label": row_cfg["label"],
                 "col_label": col_cfg["label"],
-                "mode": mode,
+                "mode": descr,
                 "ch_name": ch_name,
-                "w_row": w_row,
+                "w_row": None,
                 "w_col": w_col,
                 "sense_row": sense_row,
                 "sense_col": sense_col,
@@ -261,7 +309,8 @@ def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict],
     if skipped_rows:
         print("  INACTIVE mode rows (not in this diagonalization):")
         for row_cfg in skipped_rows:
-            print(f"    {row_cfg['label']} ({row_cfg['mode']})")
+            axis = row_cfg.get("mode", row_cfg.get("axis", "?"))
+            print(f"    {row_cfg['label']} ({axis})")
         print()
         print("  These rows RETAIN their previous SENSE values. If feedback for")
         print("  these modes was active, it is running on STALE coefficients.")
@@ -356,10 +405,10 @@ def main() -> None:
             sw1_str = "already on" if sw["input_on"] else "will enable"
             sw2_str = "already on" if sw["output_on"] else "will enable"
         if e["w_col"] is not None:
-            mapping = (f"W[{e['w_row']},{e['w_col']}] ({e['row_label']}<-{e['col_label']})"
+            mapping = (f"(n·W)[{e['w_col']}] ({e['row_label']}[{e['mode']}]<-{e['col_label']})"
                        f" → SENSE[{e['sense_row']},{e['sense_col']}]")
         else:
-            mapping = (f"W[{e['w_row']},—] ({e['row_label']}<-{e['col_label']} not in diag)"
+            mapping = (f"({e['row_label']}<-{e['col_label']} not in diag)"
                        f" → SENSE[{e['sense_row']},{e['sense_col']}] = 0")
         print(
             f"  {e['epics_channel']:<40} {e['value']:>14.6f}"

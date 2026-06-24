@@ -383,8 +383,13 @@ def disable_poles_inputs(cfg: dict, snap: dict, dry_run: bool) -> None:
                 caput(f"{b}_SW1", sw1_bit)
 
 
-def restore_poles(cfg: dict, snap: dict, dry_run: bool) -> None:
-    """Restore GAIN/OFFSET/TRAMP and re-enable any input switch that was on."""
+def restore_poles(cfg: dict, snap: dict, dry_run: bool,
+                  skip_gain: bool = False) -> None:
+    """Restore GAIN/OFFSET/TRAMP and re-enable any input switch that was on.
+
+    skip_gain=True omits the GAIN write, leaving it at 0 so a still-active AWG comb
+    cannot reach the DAC output.  Use when the AWG drain check timed out.
+    """
     sw1_bit = cfg["safety"]["sw1_input_on_bit"]
     tramp = cfg["safety"].get("restore_tramp_s", 2.0)
     for e in cfg["electrodes"]:
@@ -392,13 +397,14 @@ def restore_poles(cfg: dict, snap: dict, dry_run: bool) -> None:
         s = snap[e]
         if dry_run:
             print(f"  DRY-RUN: restore {b}: GAIN={s['gain']} OFFSET={s['offset']} "
-                  f"TRAMP={s['tramp']} input_on={s['input_on']}")
+                  f"TRAMP={s['tramp']} input_on={s['input_on']}"
+                  + (" (GAIN skipped — AWG not confirmed stopped)" if skip_gain else ""))
             continue
         if s["tramp"] is not None:
             caput(f"{b}_TRAMP", tramp)
         if s["offset"] is not None:
             caput(f"{b}_OFFSET", s["offset"])
-        if s["gain"] is not None:
+        if not skip_gain and s["gain"] is not None:
             caput(f"{b}_GAIN", s["gain"])
         # re-enable input switch if it was on and is now off
         cur = caget_batch([f"{b}_SW1R"]).get(f"{b}_SW1R")
@@ -469,8 +475,12 @@ def setup_acts_for_measurement(cfg: dict, excl: list[str], snap: dict,
             caput(f"{base}_SW2", sw2_bit)      # XOR-toggle → turn output ON
 
 
-def restore_acts(cfg: dict, excl: list[str], snap: dict, dry_run: bool) -> None:
-    """Restore ACTS elements to their pre-measurement state (idempotent)."""
+def restore_acts(cfg: dict, excl: list[str], snap: dict, dry_run: bool,
+                 skip_gain: bool = False) -> None:
+    """Restore ACTS elements to their pre-measurement state (idempotent).
+
+    skip_gain=True omits the GAIN write — same rationale as restore_poles.
+    """
     sw1_bit = cfg["safety"]["sw1_input_on_bit"]
     sw2_bit = cfg["safety"]["sw2_output_on_bit"]
     tramp = cfg["safety"].get("restore_tramp_s", 2.0)
@@ -479,13 +489,14 @@ def restore_acts(cfg: dict, excl: list[str], snap: dict, dry_run: bool) -> None:
         s = snap[exc]
         if dry_run:
             print(f"  DRY-RUN: restore {base}: GAIN={s['gain']} "
-                  f"input_on={s['input_on']} output_on={s['output_on']}")
+                  f"input_on={s['input_on']} output_on={s['output_on']}"
+                  + (" (GAIN skipped — AWG not confirmed stopped)" if skip_gain else ""))
             continue
         if s["tramp"] is not None:
             caput(f"{base}_TRAMP", tramp)
         if s["offset"] is not None:
             caput(f"{base}_OFFSET", s["offset"])
-        if s["gain"] is not None:
+        if not skip_gain and s["gain"] is not None:
             caput(f"{base}_GAIN", s["gain"])
         cur = caget_batch([f"{base}_SW1R"]).get(f"{base}_SW1R")
         cur_in = (cur is not None) and bool(int(cur) & sw1_bit)
@@ -1389,14 +1400,17 @@ def main() -> None:
             print("Waiting for AWG excitation to drain (EXC channels → 0)...")
             drained = _wait_for_awg_drain(cfg, exc_channels)
             if not drained:
-                print("WARNING: AWG did not drain within timeout; restoring anyway.")
+                print("WARNING: AWG did not drain within timeout; "
+                      "restoring without GAIN (GAIN stays 0 — excitation blocked).")
             else:
                 print("AWG drained — restoring POLES state.")
-            # Step 3: restore all settings including GAIN (now safe to ramp up).
+            # Step 3: restore all settings. If drain timed out, skip_gain=True keeps
+            # GAIN=0 so a still-running AWG comb cannot reach the DAC output.
             try:
-                restore_poles(cfg, snap, dry_run=False)
+                restore_poles(cfg, snap, dry_run=False, skip_gain=not drained)
                 if acts_enabled:
-                    restore_acts(cfg, exc_channels, acts_snap, dry_run=False)
+                    restore_acts(cfg, exc_channels, acts_snap, dry_run=False,
+                                 skip_gain=not drained)
             finally:
                 restored[0] = True
 

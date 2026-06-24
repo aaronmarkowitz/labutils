@@ -1,0 +1,178 @@
+# =====================================================================
+#  ACTS actuation-matrix inversion config  (upload_actuation_matrix.py)
+# =====================================================================
+#
+# WHAT THIS DOES
+# --------------
+# Reads measured electrode->particle actuator gains, inverts them, and writes
+# per-electrode coefficients into the Y1:DMD ACTS matrix so that each ACTS
+# COLUMN you mark "coupled" drives the electric field in a chosen direction in
+# the x-y (or, once z couplings are measured, x-y-z) plane.
+#
+# The single abstraction: *for each ACTS column, say whether it couples to the
+# E-field and, if so, in what direction.* That covers every operating mode:
+#   (1) drive electrodes while feeding x/y back to the LASER -> leave XCTL/YCTL
+#       UNCOUPLED (their signal goes to the laser rows, not the electrodes).
+#   (2) feed particle motion back to electrode voltage -> XCTL coupled at 0 deg,
+#       YCTL coupled at 90 deg.
+#   (3) fixed-direction sinusoid for a lock-in -> any column coupled at angle T.
+#   (4) fixed-magnitude rotating field -> two columns at T and T+-90 deg, equal
+#       gains, driven by cos/sin tones (LOC/LOS, or spinC/spinS).
+#   (5) any combination -- columns are independent.
+#
+# THE MATRIX (authoritative layout; hard-coded here, see FUTURE_WORK.md for a
+# planned auto-extraction script). ACTS is 8x8 on Y1:DMD:
+#   columns: 1 XCTL  2 YCTL  3 ZCTL  4 LOC  5 LOS  6 spinC  7 spinS  8 RCTL
+#   rows:    1 V1=E1 2 V2=E2 3 V3=E3 4 V4=E4 5 LASER_CTLX 6 LASER_CTLZ
+#            7 DAC6  8 DAC7
+# This script ONLY writes electrode rows 1..4 of coupled columns. Laser rows
+# and DAC rows are never touched.
+# (DAC6/DAC7 are physically cabled to the LOC/LOS column inputs -- handy for an
+#  end-to-end hardware loopback test of the inverted LOC/LOS columns.)
+#
+# THE PHYSICS (why field_normalize exists)
+# ----------------------------------------
+# measure_actuator_gain fits a PEAK-normalized plant (|H(f0)|=1), so the stored
+# complex gain G[dof,elec] = (counts->force/field coupling) * chi(omega0)_dof,
+# where chi(omega0)_dof = Q_dof/(m*omega0_dof^2) is the ON-RESONANCE
+# susceptibility. PARTICLE_X/Y/Z are scaled to a common (uncalibrated) distance
+# unit with common mass, so the only dof-to-dof difference in G is chi(omega0).
+# To drive a *physical field* of equal magnitude in any direction we divide it
+# out. Gas-dominated damping => the damping rate gamma=f0/Q is common across
+# modes WITHIN one file (but drifts between files with pressure), so:
+#   s_dof = f0_dof * gamma_file        (= 1/chi(omega0), up to a constant)
+# and each electrode's column is scaled by ITS OWN file's gamma -- which also
+# corrects cross-run pressure drift in the relative electrode strengths.
+
+prefix: "Y1:DMD"
+matrix_name: "ACTS"
+
+# Map each electrode label to its ACTS row (V1..V4 = E1..E4).
+electrode_row:
+  E1: 1
+  E2: 2
+  E3: 3
+  E4: 4
+
+# Electrode ordering of the forward matrix columns (defaults to electrode_row
+# keys if omitted). Must match the labels used in the data files.
+electrodes: ["E1", "E2", "E3", "E4"]
+
+# Particle DOFs (forward-matrix rows). Today only x,y are measured; add "z"
+# here once a 3-DOF actuator-gain run exists and the data files contain it.
+dofs: ["x", "y"]
+
+# --- Measured data: one entry per result file -----------------------------
+# Each actuator_gain_results.h5 carries its own dof_order + electrodes, so any
+# layout works (one electrode per file, all electrodes in one file, etc.). The
+# (dof, electrode) cells are merged across files. $VARS are expanded.
+#   electrode: (optional) cross-check that the file contains exactly these.
+data:
+  - {electrode: "E1", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_144535_actgain_xyDOF_E1_260622/actuator_gain_results.h5"}
+  - {electrode: "E2", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_150032_actgain_xyDOF_E2_260622/actuator_gain_results.h5"}
+  - {electrode: "E3", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_151425_actgain_xyDOF_E3_260622/actuator_gain_results.h5"}
+  - {electrode: "E4", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_154747_actgain_xyDOF_E4_260622/actuator_gain_results.h5"}
+
+# --- Inversion knobs -------------------------------------------------------
+# gain_reduction: how each complex gain becomes a real number.
+#   signed_magnitude (only option) = |G|*sign(cos(phase)); exact for ~0/180 deg.
+gain_reduction: "signed_magnitude"
+
+# field_normalize: susceptibility removal (see THE PHYSICS above).
+#   common_gamma (default) = s_dof = f0_dof * gamma_file (per-file gas-damping).
+#   per_mode_q             = s_dof = f0_dof^2 / Q_dof (uses each mode's noisy Q).
+#   none                   = raw response (s_dof = 1); "direction" = response dir.
+field_normalize: "common_gamma"
+
+# Warn if a file's per-mode gamma=f0/Q disagree by more than this fraction
+# (undermines the gas-dominated common-gamma assumption for that file).
+gamma_spread_warn: 0.20
+
+# --- Global field anchor (fixes the magnitude unit of gain=1) --------------
+# field_normalize (above) removes the per-DOF susceptibility chi(omega0), which
+# leaves A_field = c * B: B[d,e] = field-per-count (electrode geometry only) and
+# c = cal*q/(4pi^2 m) is a SINGLE global scalar that changes particle-to-particle
+# (but NOT with pressure/Q -- A ~ chi and s_d ~ 1/chi cancel). Dividing A_field
+# by any degree-1 functional cancels c, so the written matrix depends ONLY on the
+# electrodes => gain=1 produces the same field whenever the electrodes are
+# unchanged. gain remains the after-the-fact rescaling knob.
+field_anchor:
+  mode: "self_norm"          # none | self_norm | physical
+                             #   none      = old behaviour (gain=1 NOT reproducible)
+                             #   self_norm = divide by the functional below
+                             #   physical  = same, with physical_scale set to ||B||_F
+  functional: "frobenius"    # frobenius (default; RMS over all cells, most robust
+                             #   to single-cell noise) | sigma_max | reference_column
+  # reference_electrode: "E1"  # only used when functional: reference_column
+  physical_scale: 1.0        # P. Leave 1.0 for an arbitrary-but-fixed electrode
+                             # unit. FUTURE: set to ||B||_F (= comsol_E_per_volt *
+                             # dac_to_volts * COMSOL geometry factor, from a model
+                             # iterated to match the measured B shape) so gain=1
+                             # = 1 V/m. Realized |F| = gain * ||B||_F / P.
+
+# Warn if any (dof,electrode) cell feeding the inversion has coherence below:
+low_coherence_warn: 0.30
+
+# n_averages used to turn coherence into a relative gain error (uncertainty
+# propagation). Match the n_averages of the actuator-gain measurement.
+n_averages_for_error: 30
+
+# Duplicate (dof,electrode) across files: "error" (default) or "average".
+duplicate: "error"
+
+# If a requested direction has a component outside the measured DOFs (e.g. a z
+# tilt while only x,y are measured): false -> project onto x,y with a warning;
+# true -> hard error.
+strict_subspace: false
+
+# Ramp time (s) applied to each ACTS element before writing its gain.
+tramp_s: 5.0
+
+# --- Columns ---------------------------------------------------------------
+# One entry per ACTS column. Fields:
+#   index    : ACTS column number (1..8), required.
+#   label    : human label (XCTL, LOC, ...), for readable output.
+#   coupled  : true -> write inverted electrode coefficients; false -> skip.
+#   clear    : (uncoupled only) true -> zero electrode rows 1..4 of this column.
+#   gain     : per-column field scale (default 1.0). Equal gains in two
+#              orthogonal columns => equal field magnitude (true rotating field).
+#   direction (coupled only): ONE of --
+#       mode: "x"|"y"|"z"          axis shorthand
+#       angle_deg: <deg>           in-plane azimuth from +x toward +y
+#       elevation_deg / azimuth_deg   full-sphere (elevation above x-y plane)
+#       vector: [x, y, z]          explicit components (normalized)
+#
+# The example below is MODE 2 (motion -> electrode voltage feedback): XCTL drives
+# the field along +x, YCTL along +y; everything else is left untouched.
+# Edit freely -- the config is fully general; these are just illustrations.
+columns:
+  - {index: 1, label: "XCTL",  coupled: true,  angle_deg: 0,   gain: 1.0}
+  - {index: 2, label: "YCTL",  coupled: true,  angle_deg: 90,  gain: 1.0}
+  - {index: 3, label: "ZCTL",  coupled: false}
+  - {index: 4, label: "LOC",   coupled: true, angle_deg: 0, gain: 1.0}              # see MODE 3/4 below
+  - {index: 5, label: "LOS",   coupled: false}
+  - {index: 6, label: "spinC", coupled: true, angle_deg: 0, gain: 1.0}
+  - {index: 7, label: "spinS", coupled: true, angle_deg: -90, gain: 1.0}
+  - {index: 8, label: "RCTL",  coupled: false}
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES (copy/adapt into the columns: list above)
+# ---------------------------------------------------------------------------
+# MODE 1 -- drive electrodes while feeding x/y back to the LASER:
+#   - {index: 1, label: "XCTL", coupled: false}   # x ctrl -> laser, not E-field
+#   - {index: 2, label: "YCTL", coupled: false}
+#   (optionally add `clear: true` or run with --clear-uncoupled to zero any
+#    stale electrode coefficients left in those columns from a previous mode.)
+#
+# MODE 3 -- fixed-direction sinusoid for a lock-in along, say, 30 deg:
+#   - {index: 4, label: "LOC", coupled: true, angle_deg: 30, gain: 1.0}
+#   then put your sine tone on the LOC column input.
+#
+# MODE 4 -- fixed-magnitude field rotating in the x-y plane:
+#   - {index: 4, label: "LOC", coupled: true, angle_deg: 0,  gain: 1.0}
+#   - {index: 5, label: "LOS", coupled: true, angle_deg: 90, gain: 1.0}
+#   drive LOC with cos(wt) and LOS with sin(wt). Use angle_deg: -90 on LOS to
+#   reverse the rotation sense. (spinC/spinS columns work identically.)
+#
+# MODE 5 -- combine: e.g. XCTL/YCTL feedback (mode 2) AND a LOC/LOS rotating
+#   probe (mode 4) at once -- just list all four columns coupled.

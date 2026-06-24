@@ -9,12 +9,16 @@ scripts are the **acquisition and EPICS-deploy** half (mirror of the
 
 | File | Purpose |
 |---|---|
-| `upload_sense_matrix.py` | Upload a sensor-diagonalization (SENSE) matrix to EPICS (consumes pipeline step_01 HDF5). |
-| `sense_matrix_config.yml` | SENSE matrix layout for `upload_sense_matrix.py`. |
+| `upload_sense_matrix.py` | Upload a sensor-diagonalization (SENSE) matrix to EPICS (consumes pipeline step_01 HDF5). Rows read out the particle along **any direction** (axis / xy angle / full-sphere elevation+azimuth / explicit vector). |
+| `sense_matrix_config.yml` | SENSE matrix layout + directional row spec for `upload_sense_matrix.py`. |
 | `measure_actuator_gain.py` | **Measure** the flat actuator gain of POLES_E1..E4 to active particle DOFs via a `diag` SineResponse; extract a complex K×4 coupling matrix (K = number of active DOFs, typically 2 or 3). |
 | `measure_actuator_gain_config.yml` | Parameters for `measure_actuator_gain.py`. |
+| `upload_actuation_matrix.py` | **Invert** measured actuator gains and write the ACTS matrix so each ACTS column drives the E-field in a chosen direction. |
+| `upload_actuation_matrix_config.yml` | ACTS inversion config (per-column direction/coupling) for `upload_actuation_matrix.py`. |
+| `utility.py` | Shared coordinate-system parser (direction → unit vector) used by both the ACTS and SENSE uploaders. |
 | `abort_actuator_gain.sh` | Emergency abort (touches the sentinel file; wire to an MEDM button). |
 | `tests/` | pytest suite (pure-logic) + opt-in `-m loopback` live hardware self-test. |
+| `FUTURE_WORK.md` | Deferred work (matrix-layout auto-extraction, z actuator couplings). |
 
 Run with the **cds-testing** interpreter (`/var/lib/cds-conda/base/envs/cds-testing/bin/python3`)
 — it has `nds2`, `dttxml`, `numpy`, `scipy`, `h5py`, `yaml`, `pytest`. The `mastqg`
@@ -243,6 +247,61 @@ injection/analysis path.
 
 ---
 
+## `upload_actuation_matrix.py` — invert actuator gains → ACTS matrix
+
+Reads one or more `actuator_gain_results.h5` files (from `measure_actuator_gain.py`),
+assembles the forward actuation matrix **A** (DOF × electrode), inverts it, and writes
+per-electrode coefficients into the **ACTS** matrix so that each *configured ACTS column*
+drives the electric field in a chosen direction. The single abstraction — *per column,
+say whether it couples to the field and in what direction* — covers every operating mode
+(laser-feedback while driving, motion→voltage feedback, fixed-direction lock-in drive,
+fixed-magnitude rotating field, and combinations). See the heavily-commented
+`upload_actuation_matrix_config.yml` for worked examples of each.
+
+**N files, any layout.** Each result file carries its own `dof_order` + `electrodes`, so
+4 single-electrode files, one 4-electrode file, 2×2, or one-DOF-per-file all assemble to
+the same A (each cell keyed by `(dof, electrode)`). Duplicates → `error` (default) or
+`average`; a missing cell is a named error.
+
+**Physical-field normalization (important).** `measure_actuator_gain` fits a
+**peak-normalized** plant (`|H(f0)|=1`), so the stored gain carries the full on-resonance
+susceptibility `χ(ω₀)=Q/(mω₀²)`. To drive a *physical field* of equal magnitude in any
+direction we divide it out. Gas-dominated damping ⇒ the damping rate `γ=f0/Q` is common
+across modes **within a single file** (but drifts between files with pressure), so per
+file we pool the per-mode `γ_d` (residual-weighted, with uncertainty σ_γ) into one
+`γ_file` and scale each DOF by `s_d = f0_d · γ_file`. Each electrode's column uses **its
+own file's γ**, which corrects cross-run pressure drift. Modes: `common_gamma` (default),
+`per_mode_q` (`f0²/Q`), `none` (raw response). The dry-run prints per-file f0/Q, γ±σ_γ
+(with a spread warning), A, A_field with per-element uncertainties, condition number, and
+per-column electrode coefficients with propagated uncertainties.
+
+**Global field anchor (`gain=1` is reproducible).** After χ removal,
+`A_field = c·B`, where `B` is the field-per-count matrix (electrode geometry only) and
+`c = cal·q/(4π²m)` is a *single global scalar* that changes particle-to-particle (but
+**not** with pressure/Q — `A∝χ` and `s_d∝1/χ` cancel). `field_anchor` divides `A_field`
+by a degree-1 functional (`frobenius` default, also `sigma_max`/`reference_column`), which
+cancels `c` exactly, so the written matrix depends **only on the electrodes** — `gain=1`
+produces the same field whenever the electrodes are unchanged. `gain` stays the
+after-the-fact rescaling knob. `physical_scale` `P` (default 1.0) is the future V/m hook:
+set `P = ‖B‖_F` (from a COMSOL model iterated to match the measured `B` shape) and `gain=1`
+→ 1 V/m; realized `|F| = gain·‖B‖_F/P`. `mode: none` restores the old drift-prone behaviour.
+
+**Reductions & safety.** Complex gains → real via **signed magnitude** `|G|·sign(cos φ)`
+(warns when φ is near ±90°). Only electrode rows 1–4 of *coupled* columns are written;
+laser rows are never touched. Uncoupled columns are left untouched unless `clear: true`
+(per column) or `--clear-uncoupled`. Switches are **GAIN-only + warn** by default; pass
+`--enable-switches` to take a column live. Always start with `--dry-run`.
+
+```
+/var/lib/cds-conda/base/envs/cds-testing/bin/python3 upload_actuation_matrix.py --dry-run
+```
+
+xyz-ready: directions are full 3-D; today A is 2×4 (x,y measured) so a z-bearing
+direction is projected onto x,y with a warning (`strict_subspace: true` to error). Once
+z couplings are measured, add `z` to `dofs:` and A becomes 3×4 with no code change.
+
+---
+
 ## Testing
 ```
 cd /home/controls/labutils/scripts/dipole
@@ -254,7 +313,13 @@ density, snapping), Schroeder crest-factor reduction, diag-XML round-trip,
 `compute_tfs` (recovers known TFs + coherence + **phase** from synthetic captured data,
 coherence scaling with number of Welch averages, `n_averages` config resolution), the
 plant+gain fit (recovers known gains from synthetic data), the guard band-RMS math,
-and POLES snapshot/restore + amplitude clamping (mocked EPICS).
+and POLES snapshot/restore + amplitude clamping (mocked EPICS). It also covers the
+shared coordinate parser (`test_utility.py`), the ACTS inversion
+(`test_upload_actuation_matrix.py`: signed-magnitude, N-file forward-matrix assembly,
+γ pooling, field normalization, unit-response inversion, rotating field, uncertainty
+propagation, coupled/clear/channel-string planning), and the directional SENSE rows
+(`test_upload_sense_matrix.py`: n·W math, axis back-compat, full-sphere, subspace
+validation, regression vs the real step-01 W).
 The loopback hardware suite additionally validates phase recovery and coherence-vs-averages
 on the live FE.
 
@@ -266,9 +331,12 @@ approach is version-independent. You may still want to pin dtt to stable `4.1.4`
 general hygiene (separate sysadmin step).
 
 ## Future work
+See `FUTURE_WORK.md` for the full list (matrix-layout auto-extraction; measuring z
+actuator couplings for 3-D field steering). In brief:
 - Generalize the flat-gain assumption to a frequency-dependent actuation matrix
   (electrode capacitance becomes relevant at higher frequency).
 - Closed-loop variant (inject on top of a live trap feedback loop).
-- A companion `upload_actuation_matrix.py` (analogue of `upload_sense_matrix.py`) to
-  push the measured matrix to EPICS, and/or wire the HDF5 into the pipeline's
-  `step_02_actuator_diagonalization.py` (currently a stub).
+- Measure electrode→PARTICLE_Z couplings so `upload_actuation_matrix.py`'s A becomes
+  3×4 and full xyz field directions are realizable (the code already supports it).
+- Wire the inverted matrix into the pipeline's `step_02_actuator_diagonalization.py`
+  (currently a stub).
