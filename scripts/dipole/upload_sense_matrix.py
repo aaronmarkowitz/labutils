@@ -176,6 +176,11 @@ def build_mapping(hdf5: dict, config: dict) -> tuple[list[dict], list[dict]]:
                 "w_col": w_col,
                 "sense_row": sense_row,
                 "sense_col": sense_col,
+                # input filter-module feeding this SENSE column (only if the column is
+                # actually part of the diagonalization). Used to enable the module so the
+                # uploaded W is actually realized — a gain-zeroed/switched-out input column
+                # silently deletes that W column and corrupts the PARTICLE outputs.
+                "input_base": f"{prefix}-{suffix}" if w_col is not None else None,
             })
 
     return entries, skipped_rows
@@ -270,6 +275,72 @@ def write_entry(entry: dict, sw_state: dict, tramp: float, dry_run: bool) -> boo
     if not sw_state["output_on"]:
         ok = _caput(f"{base}_SW2", _SW2_OUTPUT_ON_BIT) and ok
 
+    return ok
+
+
+def input_modules_for_entries(entries: list[dict]) -> list[str]:
+    """Unique input filter-module bases feeding the SENSE columns being written.
+
+    Only columns that are part of the diagonalization (w_col is not None) have an
+    ``input_base``; untouched columns are excluded.
+    """
+    seen = []
+    for e in entries:
+        ib = e.get("input_base")
+        if ib and ib not in seen:
+            seen.append(ib)
+    return seen
+
+
+def read_input_module_states(input_bases: list[str]) -> dict[str, dict]:
+    """Batch-read GAIN, SW1R, SW2R for each input filter module.
+
+    Returns {base: {gain, input_on, output_on}}. Values are None if unreadable.
+    """
+    channels = []
+    for b in input_bases:
+        channels += [f"{b}_GAIN", f"{b}_SW1R", f"{b}_SW2R"]
+    raw = {}
+    if channels:
+        result = subprocess.run(["caget"] + channels,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    try:
+                        raw[parts[0]] = float(parts[1])
+                    except (ValueError, TypeError):
+                        raw[parts[0]] = None
+    states = {}
+    for b in input_bases:
+        gain = raw.get(f"{b}_GAIN")
+        sw1r = raw.get(f"{b}_SW1R")
+        sw2r = raw.get(f"{b}_SW2R")
+        states[b] = {
+            "gain": gain,
+            "input_on": (sw1r is not None) and bool(int(sw1r) & _SW1_INPUT_ON_BIT),
+            "output_on": (sw2r is not None) and bool(int(sw2r) & _SW2_OUTPUT_ON_BIT),
+        }
+    return states
+
+
+def enable_input_module(base: str, state: dict, tramp: float, dry_run: bool) -> bool:
+    """Force an input filter module ON: GAIN=1 and input/output switches enabled.
+
+    The SENSE matrix assumes each input column carries the unity-gain filter output the
+    W diagonalization was computed against. A zeroed gain or open switch deletes that W
+    column. We always set GAIN=1 (per design decision) and enable both switches if off.
+    """
+    if dry_run:
+        return True
+    ok = True
+    ok = _caput(f"{base}_TRAMP", tramp) and ok
+    ok = _caput(f"{base}_GAIN", 1.0) and ok
+    if not state["input_on"]:
+        ok = _caput(f"{base}_SW1", _SW1_INPUT_ON_BIT) and ok
+    if not state["output_on"]:
+        ok = _caput(f"{base}_SW2", _SW2_OUTPUT_ON_BIT) and ok
     return ok
 
 
@@ -416,6 +487,31 @@ def main() -> None:
         )
     print()
 
+    # Input filter modules feeding the written SENSE columns: these must be ON (GAIN=1,
+    # switches enabled) or the uploaded W column is silently deleted from the live map.
+    input_bases = input_modules_for_entries(entries)
+    if args.dry_run:
+        in_states = {b: {"gain": None, "input_on": None, "output_on": None}
+                     for b in input_bases}
+    else:
+        in_states = read_input_module_states(input_bases)
+
+    if input_bases:
+        print(f"  {prefix}Enabling {len(input_bases)} input filter module(s) "
+              f"(force GAIN=1, switches on):")
+        print(f"  {'Module':<28} {'cur.GAIN':>9}  {'SW1(in)':>11}  {'SW2(out)':>11}  Action")
+        print(f"  {'-'*28} {'-'*9}  {'-'*11}  {'-'*11}  {'-'*24}")
+        for b in input_bases:
+            s = in_states[b]
+            if args.dry_run:
+                g_str, sw1_str, sw2_str = "dry-run", "dry-run", "dry-run"
+            else:
+                g_str = "?" if s["gain"] is None else f"{s['gain']:.3g}"
+                sw1_str = "already on" if s["input_on"] else "will enable"
+                sw2_str = "already on" if s["output_on"] else "will enable"
+            print(f"  {b:<28} {g_str:>9}  {sw1_str:>11}  {sw2_str:>11}  set GAIN=1, ensure ON")
+        print()
+
     if args.dry_run:
         print("  Dry run complete — no channels were written.")
         return
@@ -426,6 +522,16 @@ def main() -> None:
         ok = write_entry(e, sw_states[e["base"]], args.tramp, dry_run=False)
         status = "ok" if ok else "FAILED"
         print(f"  {e['epics_channel']:<40}  {status}")
+        if ok:
+            n_ok += 1
+        else:
+            n_fail += 1
+
+    # Enable the input filter modules feeding the written columns.
+    for b in input_bases:
+        ok = enable_input_module(b, in_states[b], args.tramp, dry_run=False)
+        status = "ok" if ok else "FAILED"
+        print(f"  {b + '_GAIN/SW':<40}  {status}")
         if ok:
             n_ok += 1
         else:

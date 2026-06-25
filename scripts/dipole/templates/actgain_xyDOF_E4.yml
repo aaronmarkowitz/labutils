@@ -1,0 +1,95 @@
+# Configuration for measure_actuator_gain.py
+#
+# 2026-06-22 — X and Y DOFs only, electrode E4 only.
+# Guard band at standard 10-20 Hz (no Z tones to conflict with it).
+#
+# See scripts/dipole/README.md for method, pitfalls, and deployment notes.
+
+prefix: "Y1:DMD"
+electrodes: ["E4"]   # -> Y1:DMD-POLES_E4_EXC
+
+dofs:
+  x:
+    channel: "Y1:DMD-PARTICLE_X_IN1"
+    f0: 39.0
+    Q: 30.0
+    n_tones: 10            # 8 tones / 4 electrodes = 2 per electrode
+    tone_spacing_hz: 1.5
+    fit_plant: true
+    fit_strategy: dof_filtered
+  y:
+    channel: "Y1:DMD-PARTICLE_Y_IN1"
+    f0: 54.0
+    Q: 30.0
+    n_tones: 10
+    tone_spacing_hz: 1.5
+    fit_plant: true
+    fit_strategy: mag_then_linear
+
+measurement_channel_rate: 65536
+
+frequency_plan:
+  guard_band_hz: [10.0, 20.0]
+  min_bin_separation: 3
+  fft_bin_snap: true
+
+amplitude:
+  max_amplitude_counts: 30
+  initial_amplitude_counts: 10
+  amp_step_factor: 3.0
+
+schroeder:
+  enabled: true
+
+trim:
+  target_coherence: 0.5
+  max_trim_iters: 5
+  segment_s_max: 16
+
+diag:
+  template_xml: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data/260611/actuators_sineResponse_template.xml"
+  premeasure: {min_time_s: 10.0, cycles: 10, settling_frac: 0.1}
+  measure:    {min_time_s: 10.0, cycles: 10, settling_frac: 0.1}
+  rampup_s: 1.0
+  rampdown_s: 1.0
+  average_type: 0
+  window: 1
+  diag_timeout_s: 300
+
+analysis:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  segment_s: 16
+  n_averages: 30
+  premeasure_n_averages: 3
+  warmup_s: 3.0
+  save_raw_capture: true
+
+guard_monitor:
+  nds2_server: "192.168.1.11"
+  nds2_port: 8088
+  channels: ["Y1:DMD-PARTICLE_X_IN1", "Y1:DMD-PARTICLE_Y_IN1"]
+  band_hz: [10.0, 15.0]
+  factor: 10000.0
+  baseline_seconds: 10
+  poll_seconds: 10
+
+acts:
+  enabled: false
+  electrode_row:
+    E1: 1
+    E2: 2
+    E3: 3
+    E4: 4
+
+safety:
+  poles_assume_open_loop: true
+  sw1_input_on_bit: 4
+  sw2_output_on_bit: 1024
+  restore_tramp_s: 2.0
+
+abort:
+  sentinel_path: "/tmp/abort_actuator_gain"
+
+output_root: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data"
+run_label: "actgain_xyDOF_E4_260622"
