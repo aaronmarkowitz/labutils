@@ -51,7 +51,8 @@ Channels intentionally excluded from snapshot: `UVD_LASER_ON`, `UVD_TURN_OFF` (m
 | `run_thorcam.py` | Dual-camera GUI (Thorlabs + IDS) |
 | `run_leybold_turbolab.py` | Leybold turbo pump monitoring with EPICS |
 | `fetch_nds2_data.py` | NDS2 data fetching (server 192.168.1.11:8088) |
-| `scripts/dipole/upload_sense_matrix.py` | Upload a sensor (SENSE) matrix to EPICS from pipeline step_01 HDF5 |
+| `scripts/dipole/upload_sense_matrix.py` | Upload a sensor (SENSE) matrix to EPICS from pipeline step_01 HDF5. Also force-enables the input filter modules feeding each written column (a zeroed input silently deletes a W column → PARTICLE_X/Y collapse onto the same mode). W carries a per-mode displacement calibration set by step-01 `common_unit_anchor` (default `equipartition`, the physical choice for the actuator chain — NOT `white_force` with per-mode Γ). |
+| `scripts/dipole/verify_particle_equipartition.py` | Validate a deployed SENSE matrix on recorded PARTICLE_X/Y/Z. PRIMARY check: `<new.xml> --baseline <step01_results.h5>` → per-DOF ratio `relT_new/relT_baseline` (geomean-norm), spread is the FOM. relT alone is NOT expected to be 1.0 (the estimator re-fits the W-applied data, so it's a fixed (W,estimator,dataset) shape); the baseline is reconstructed from the h5's W ⊗ its fit CSD with the current estimator. Pressure-independent in equilibrium, so it holds even at a different pressure. `--disagreement` is DEPRECATED (equip-vs-white_force anchor gap only, not the yardstick). |
 | `scripts/dipole/measure_actuator_gain.py` | Measure electrode→particle actuator gains via a `diag` SineResponse (see `scripts/dipole/README.md`) |
 | `moku/sweep.py` | Moku waveform generator sweep control |
 | `moku/pulse.py` | Moku pulse generator control |
