@@ -34,7 +34,7 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 30
+  max_amplitude_counts: 120
   initial_amplitude_counts: 10
   amp_step_factor: 3.0
 
@@ -42,7 +42,7 @@ schroeder:
   enabled: true
 
 trim:
-  target_coherence: 0.5
+  target_coherence: 0.65
   max_trim_iters: 5
   segment_s_max: 16
 

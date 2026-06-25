@@ -130,7 +130,8 @@ def _build_bode_figure(
         H_curve = _plant_lorentzian(f_curve, fit.f0, fit.Q)
         curve_vals = G_anchor * H_curve
 
-        label = f"{dof.upper()} fit  f₀={fit.f0:.2f} Hz  Q={fit.Q:.1f}"
+        gamma = getattr(fit, "gamma", fit.f0 / fit.Q if fit.Q else float("nan"))
+        label = f"{dof.upper()} fit  f₀={fit.f0:.2f} Hz  Q={fit.Q:.1f}  Γ={gamma:.2f} Hz"
         ax_amp.plot(f_curve, np.abs(curve_vals), color=color, lw=1.5,
                     label=label, zorder=2)
         ax_phase.plot(f_curve, np.degrees(np.angle(curve_vals)), color=color,
@@ -351,10 +352,17 @@ def _load_results_h5(h5_path: Path):
 
         dof_fits = {}
         for i, d in enumerate(dofs):
+            f0_d = float(f.attrs[f"peak_frequency_hz_{d}"])
+            Q_d = float(f.attrs[f"Q_{d}"])
+            # Γ = f0/Q (Hz); read the stored attr, fall back to deriving it for
+            # HDF5 files written before mode_gamma_hz_* was added.
+            gamma_d = float(f.attrs.get(f"mode_gamma_hz_{d}",
+                                        f0_d / Q_d if Q_d > 0 else float("nan")))
             dof_fits[d] = SimpleNamespace(
                 dof=d,
-                f0=float(f.attrs[f"peak_frequency_hz_{d}"]),
-                Q=float(f.attrs[f"Q_{d}"]),
+                f0=f0_d,
+                Q=Q_d,
+                gamma=gamma_d,
                 gains=gain_matrix[i],
                 fit_plant=bool(f.attrs[f"fit_plant_{d}"]),
                 residual_norm=float(f.attrs[f"residual_norm_{d}"]),

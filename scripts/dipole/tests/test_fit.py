@@ -19,6 +19,23 @@ def test_recover_gains_noiseless(synthetic_records, strategy):
         if fit_plant:
             assert abs(fit.f0 - f0) < 0.5
             assert abs(fit.Q - Q) < 5.0
+        # Γ = f0/Q is reported for every fitted mode and stays consistent with
+        # the fitted f0/Q (whether the plant was fit or held fixed).
+        assert abs(fit.gamma - fit.f0 / fit.Q) < 1e-9
+
+
+def test_gamma_from_f0_Q():
+    """gamma_from_f0_Q follows the Γ = f0/Q (Hz) convention, NaN-safe."""
+    assert abs(mag.gamma_from_f0_Q(40.0, 20.0) - 2.0) < 1e-12
+    assert np.isnan(mag.gamma_from_f0_Q(40.0, 0.0))
+    assert np.isnan(mag.gamma_from_f0_Q(40.0, float("nan")))
+
+
+def test_doffit_derives_gamma():
+    """DofFit.__post_init__ fills gamma from f0/Q when not supplied."""
+    fit = mag.DofFit(dof="x", f0=42.0, Q=21.0, gains=np.array([1.0 + 0j]),
+                     fit_plant=True, residual_norm=0.0)
+    assert abs(fit.gamma - 2.0) < 1e-12
 
 
 @pytest.mark.parametrize("strategy", ("joint", "dof_filtered"))
