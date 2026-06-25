@@ -68,10 +68,10 @@ dofs: ["x", "y"]
 # (dof, electrode) cells are merged across files. $VARS are expanded.
 #   electrode: (optional) cross-check that the file contains exactly these.
 data:
-  - {electrode: "E1", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_144535_actgain_xyDOF_E1_260622/actuator_gain_results.h5"}
-  - {electrode: "E2", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_150032_actgain_xyDOF_E2_260622/actuator_gain_results.h5"}
-  - {electrode: "E3", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_151425_actgain_xyDOF_E3_260622/actuator_gain_results.h5"}
-  - {electrode: "E4", path: "$MQG_DROPBOX_PATH/worker1/data/260622/20260622_154747_actgain_xyDOF_E4_260622/actuator_gain_results.h5"}
+  - {electrode: "E1", path: "$MQG_DROPBOX_PATH/worker1/data/260625/20260625_173818_actgain_xyDOF_E1_260622/actuator_gain_results.h5"}
+  - {electrode: "E2", path: "$MQG_DROPBOX_PATH/worker1/data/260625/20260625_175619_actgain_xyDOF_E2_260622/actuator_gain_results.h5"}
+  - {electrode: "E3", path: "$MQG_DROPBOX_PATH/worker1/data/260625/20260625_181409_actgain_xyDOF_E3_260622/actuator_gain_results.h5"}
+  - {electrode: "E4", path: "$MQG_DROPBOX_PATH/worker1/data/260625/20260625_184741_actgain_xyDOF_E4_260622/actuator_gain_results.h5"}
 
 # --- Inversion knobs -------------------------------------------------------
 # gain_reduction: how each complex gain becomes a real number.
