@@ -13,7 +13,7 @@ dofs:
     channel: "Y1:DMD-PARTICLE_X_IN1"
     f0: 39.0
     Q: 30.0
-    n_tones: 8            # 8 tones / 4 electrodes = 2 per electrode
+    n_tones: 10            # 8 tones / 4 electrodes = 2 per electrode
     tone_spacing_hz: 1.5
     fit_plant: true
     fit_strategy: dof_filtered
@@ -21,7 +21,7 @@ dofs:
     channel: "Y1:DMD-PARTICLE_Y_IN1"
     f0: 54.0
     Q: 30.0
-    n_tones: 8
+    n_tones: 10
     tone_spacing_hz: 1.5
     fit_plant: true
     fit_strategy: mag_then_linear
@@ -34,7 +34,7 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 100
+  max_amplitude_counts: 200
   initial_amplitude_counts: 10
   amp_step_factor: 3.0
 

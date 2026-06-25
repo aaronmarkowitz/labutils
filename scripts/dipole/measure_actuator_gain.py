@@ -19,6 +19,8 @@ METHOD (see README.md for the full rationale and pitfalls)
   * Because all electrodes drive the SAME mechanical mode for a given DOF, the
     common plant H_d(f) cancels in the per-DOF comparison. We fit H_d (Lorentzian
     f0, Q) jointly with the four per-electrode complex gains and report the gains.
+    The damping rate Γ = f0/Q (Hz, the Lorentzian FWHM) is reported for every
+    fitted mode (HDF5 ``mode_gamma_hz_{dof}``, report, plot legend).
     The reported gain is RELATIVE (the common per-DOF plant scale is absorbed),
     i.e. proportional to counts->Newtons. Actuator gains are assumed
     frequency-flat at these low frequencies; a future version could generalize to
@@ -113,6 +115,13 @@ class DofFit:
     fit_plant: bool
     residual_norm: float
     per_electrode_coherence: dict = field(default_factory=dict)
+    gamma: float = float("nan")  # damping rate Γ = f0/Q (Hz); FWHM of the Lorentzian
+
+    def __post_init__(self):
+        # Γ is determined by the fitted f0/Q; derive it once so every consumer
+        # (report, HDF5, plots, upload_actuation_matrix) reads a consistent value.
+        if not np.isfinite(self.gamma):
+            self.gamma = gamma_from_f0_Q(self.f0, self.Q)
 
 
 class AbortRequested(Exception):
@@ -882,6 +891,19 @@ def plant_lorentzian(f, f0, Q):
     return h_raw / peak
 
 
+def gamma_from_f0_Q(f0: float, Q: float) -> float:
+    """Damping rate Γ = f0 / Q (Hz), the FWHM of this Lorentzian.
+
+    Project convention (matches upload_actuation_matrix.py and
+    verify_particle_equipartition.py's ``mode_gamma_hz_*``). Γ is fully determined
+    by the fitted f0 and Q; reporting it alongside Q saves every downstream
+    consumer from re-deriving it. Returns NaN if Q is non-positive/NaN.
+    """
+    if Q is None or not np.isfinite(Q) or Q <= 0:
+        return float("nan")
+    return float(f0) / float(Q)
+
+
 def _coh_weight(coh):
     """Coherence-based weight: sqrt(coh / (1 - coh))."""
     c = np.clip(coh, 0, 0.999999)
@@ -1066,6 +1088,7 @@ def write_hdf5(run_dir: Path, gain_matrix: np.ndarray, dof_fits: dict,
         for d in dofs:
             f.attrs[f"peak_frequency_hz_{d}"] = dof_fits[d].f0
             f.attrs[f"Q_{d}"] = dof_fits[d].Q
+            f.attrs[f"mode_gamma_hz_{d}"] = dof_fits[d].gamma  # Γ = f0/Q (Hz)
             f.attrs[f"fit_plant_{d}"] = dof_fits[d].fit_plant
             f.attrs[f"residual_norm_{d}"] = dof_fits[d].residual_norm
         f.attrs["electrodes"] = json.dumps(electrodes)
@@ -1086,6 +1109,7 @@ def write_report(run_dir: Path, gain_matrix: np.ndarray, dof_fits: dict,
     for d in dofs:
         fit = dof_fits[d]
         lines.append(f"\nDOF {d.upper()}: f0={fit.f0:.4f} Hz  Q={fit.Q:.2f}  "
+                     f"Γ={fit.gamma:.4f} Hz  "
                      f"(plant {'fit' if fit.fit_plant else 'fixed'})  "
                      f"residual={fit.residual_norm:.3g}")
         for i, e in enumerate(electrodes):

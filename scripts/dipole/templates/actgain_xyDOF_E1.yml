@@ -34,7 +34,7 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 200
+  max_amplitude_counts: 300
   initial_amplitude_counts: 10
   amp_step_factor: 3.0
 
