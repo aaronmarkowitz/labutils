@@ -702,6 +702,9 @@ def main() -> None:
                     help="zero the electrode rows of every uncoupled column")
     ap.add_argument("--tramp", type=float, default=None,
                     help="ramp time (s) for each written element (overrides config)")
+    ap.add_argument("--plot-naive-comparison", action="store_true",
+                    help="also write a naive-vs-measurement-based ACTS E-field locus "
+                         "plot (to today's data folder; see plot_naive_vs_measured_acts.py)")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -723,6 +726,10 @@ def main() -> None:
                       res["A_pinv"], res["dof_order"], res["elec_order"],
                       res["s_lookup"], res["cells"], cfg, res["plans"], res)
     print_column_plan(res["plans"], res["dof_order"], res["A_field"], res["elec_order"])
+
+    if args.plot_naive_comparison:
+        import plot_naive_vs_measured_acts as pnm
+        pnm.make_comparison_plot(cfg, pnm._default_out_dir(), res=res)
 
     prefix = "DRY RUN -- " if args.dry_run else ""
     print(f"  {prefix}writing ACTS elements (tramp={tramp:.1f}s, "

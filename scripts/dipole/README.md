@@ -14,8 +14,9 @@ scripts are the **acquisition and EPICS-deploy** half (mirror of the
 | `verify_particle_equipartition.py` | Validate a deployed SENSE matrix: reads recorded `PARTICLE_X/Y/Z` from a CSD and checks equipartition `(2πf0)²·Var` across DOFs. PRIMARY FOM = `--baseline <step01_results.h5>` → per-DOF ratio `relT_new/relT_baseline` (geomean-norm), spread is the FOM. Plus per-DOF DHO fit cross-check + inter-DOF coherence. Run after upload on freshly-recorded diagonalized data. |
 | `measure_actuator_gain.py` | **Measure** the flat actuator gain of POLES_E1..E4 to active particle DOFs via a `diag` SineResponse; extract a complex K×4 coupling matrix (K = number of active DOFs, typically 2 or 3). |
 | `measure_actuator_gain_config.yml` | Parameters for `measure_actuator_gain.py`. |
-| `upload_actuation_matrix.py` | **Invert** measured actuator gains and write the ACTS matrix so each ACTS column drives the E-field in a chosen direction. |
+| `upload_actuation_matrix.py` | **Invert** measured actuator gains and write the ACTS matrix so each ACTS column drives the E-field in a chosen direction. `--plot-naive-comparison` also emits the naive-vs-measurement locus plot below. |
 | `upload_actuation_matrix_config.yml` | ACTS inversion config (per-column direction/coupling) for `upload_actuation_matrix.py`. |
+| `plot_naive_vs_measured_acts.py` | Polar/Cartesian E-field locus comparing the **naive** electrode diagonalization (c_x=[+1,-1,-1,+1], c_y=[+1,+1,-1,-1] phased by cos/sin θ) against the measurement-based ACTS, propagating the naive commands through the measured `A_field`. Reuses `upload_actuation_matrix.assemble()`; standalone or via `upload_actuation_matrix.py --plot-naive-comparison`. Writes to today's data folder. |
 | `utility.py` | Shared coordinate-system parser (direction → unit vector) used by both the ACTS and SENSE uploaders. |
 | `abort_actuator_gain.sh` | Emergency abort (touches the sentinel file; wire to an MEDM button). |
 | `tests/` | pytest suite (pure-logic) + opt-in `-m loopback` live hardware self-test. |
