@@ -9,8 +9,9 @@ scripts are the **acquisition and EPICS-deploy** half (mirror of the
 
 | File | Purpose |
 |---|---|
-| `upload_sense_matrix.py` | Upload a sensor-diagonalization (SENSE) matrix to EPICS (consumes pipeline step_01 HDF5). Rows read out the particle along **any direction** (axis / xy angle / full-sphere elevation+azimuth / explicit vector). |
+| `upload_sense_matrix.py` | Upload a sensor-diagonalization (SENSE) matrix to EPICS (consumes pipeline step_01 HDF5). Rows read out the particle along **any direction** (axis / xy angle / full-sphere elevation+azimuth / explicit vector). Also **force-enables the input filter modules** feeding each written SENSE column (GAIN=1, in/out switches on) so a zeroed input cannot silently delete a W column. |
 | `sense_matrix_config.yml` | SENSE matrix layout + directional row spec for `upload_sense_matrix.py`. |
+| `verify_particle_equipartition.py` | Validate a deployed SENSE matrix: reads recorded `PARTICLE_X/Y/Z` from a CSD and checks equipartition `(2πf0)²·Var` across DOFs. PRIMARY FOM = `--baseline <step01_results.h5>` → per-DOF ratio `relT_new/relT_baseline` (geomean-norm), spread is the FOM. Plus per-DOF DHO fit cross-check + inter-DOF coherence. Run after upload on freshly-recorded diagonalized data. |
 | `measure_actuator_gain.py` | **Measure** the flat actuator gain of POLES_E1..E4 to active particle DOFs via a `diag` SineResponse; extract a complex K×4 coupling matrix (K = number of active DOFs, typically 2 or 3). |
 | `measure_actuator_gain_config.yml` | Parameters for `measure_actuator_gain.py`. |
 | `upload_actuation_matrix.py` | **Invert** measured actuator gains and write the ACTS matrix so each ACTS column drives the E-field in a chosen direction. |
@@ -25,6 +26,68 @@ Run with the **cds-testing** interpreter (`/var/lib/cds-conda/base/envs/cds-test
 conda env (used by the analysis pipeline) has `dttxml` but **not** `nds2`/`pytest`.
 
 ---
+
+## `upload_sense_matrix.py` — deploy W, and the equipartition calibration it carries
+
+Uploads the step-01 demodulation matrix `W` to the `Y1:DMD-SENSE_{row}_{col}_GAIN`
+elements (`value = n·W` per directional row). Two things to understand before trusting
+the resulting `PARTICLE_X/Y/Z`:
+
+**1. The SENSE inputs are the LES filter-module OUTPUTS, not the IN1 testpoints.** `W` is
+computed against the sensor channels, but the matrix multiplies whatever the filter
+modules pass. If a module is gain-zeroed or switched out (observed live: `Y1:DMD-PBSZ_GAIN
+= 0`), that `W` column is effectively deleted and the diagonalization breaks — typically
+PARTICLE_X and PARTICLE_Y then *both* show the y resonance, because the dropped channel
+(PBSZ) was the one separating x from y in dof-space. The uploader now **force-enables every
+input module feeding a written column** (sets GAIN=1, enables in/out switches) and prints
+the planned changes under `--dry-run`. Always `--dry-run` first.
+
+**2. `W` carries a per-mode displacement calibration set by the step-01 `common_unit_anchor`.**
+The pipeline default is **equipartition** (`s ∝ 1/(f0·√(A·Γ))`, equal k_BT per mode) — robust
+for an equilibrium (gas-damping-dominated) particle regardless of drag anisotropy, and
+correct for the downstream actuator/dipole chain. The legacy **white_force** anchor
+(`s ∝ 1/(f0·Γ·√A)`, isotropic force noise) imposes a spurious `1/√Γ` x/y calibration tilt
+when per-mode Γ differ (by fluctuation–dissipation `S_FF,i ∝ Γ_i`), which propagates straight
+into the actuator coefficients. The two coincide under shared Γ. The applied anchor is
+recorded in the h5 `mode_scale_anchor` attribute — check it is `equipartition` for any W that
+feeds actuator measurement. (Full derivation: dipole_pipeline README "Common-unit
+normalization".)
+
+**Validate after upload** with `verify_particle_equipartition.py <new_CSD.xml> --baseline
+<step01_results.h5>`: record a CSD with the diagonalized `PARTICLE_X/Y/Z` channels and confirm
+each DOF reproduces the baseline equipartition shape. Equipartition is **pressure-independent
+in equilibrium**, so this should hold even at a different gas pressure than `W` was fit on; a
+reproducible deviation ≫ fit noise then indicates a real non-equilibrium effect (feedback /
+multiple baths / mode-dependent heating), not a calibration error. The script fits a DHO+floor
+model per peak and integrates the DHO term (`πAΓ/2`) to reject floor/sensing noise — and
+mains-masks + floor-subtracts the empirical band integral (a naive integral lets a 60 Hz line
+in the y band or the 1/f wall in the z band inflate the apparent T by up to ~10×). This
+estimator is the **single source of truth** in `dipole_pipeline/diagnostics/equipartition.py`,
+imported by both this validator and the step-01 self-check (`particle_xyz_from_W.png`,
+auto-emitted by step_01), so both report the same rigorous DHO-based relT.
+
+**The apples-to-apples yardstick (read this).** Because the validator **applies `W` to data
+and re-fits a DHO+floor** (it does *not* reuse the anchor's `A=1, Γ_fit`), the recovered relT
+is **NOT 1.0/1.0/1.0 even on the CSD `W` was fit from** — it is a fixed `(W, estimator,
+dataset)` shape (e.g. 1.00/0.83/1.03). Comparing relT to an idealized 1.0 is apples-to-oranges.
+Instead pass `--baseline <step01_results.h5>`: the script **reconstructs** the in-sample
+baseline relT by applying that run's `W` to its fit CSD (`source_csd_path`, persisted by
+step_01) and reducing with the *current* estimator, then reports the per-DOF **ratio**
+`relT_new / relT_baseline` (geomean-normalized, so global T/pressure cancels) and its **spread
+as the FOM**. The estimator-induced shape divides out, so ratio ≈ 1 means equipartition is
+reproduced. Reconstructing (rather than freezing a number) keeps old baselines comparable as
+the estimator evolves. **Each ratio carries a physical ±1σ error bar** — the finite-averaging
+(χ²) uncertainty `σ(S)=S/√n_avg` propagated through `Var=A·πΓ/2` (via the weighted DHO fit
+covariance), combined for both legs in quadrature; the per-mode `W` normalization cancels in
+the ratio so it does not enter. There is **no arbitrary tolerance band** — a DOF is consistent
+with equipartition if its ratio sits within ±1σ of 1, and the console prints the worst
+`|ratio−1|/σ`. The bar shrinks as `1/√n_avg`, so a high-average CSD is judged more tightly.
+*Stale-W caveat:* a baseline given as a **CSD xml** is only valid if
+recorded **after** the `W` upload — the fit CSD's own `PARTICLE_*` channels are stale (recorded
+under the previous SENSE matrix); the robust baseline is the step-01 `results.h5`. The legacy
+`--disagreement` band is **deprecated and not the yardstick** (it draws `±exp(disagreement)`,
+`disagreement = max|ln(s_white/s_equip)| = ½·spread(lnΓ)`, i.e. only the equip-vs-`white_force`
+anchor gap — irrelevant once committed to equipartition).
 
 ## `measure_actuator_gain.py`
 
