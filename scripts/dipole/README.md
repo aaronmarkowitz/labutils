@@ -16,7 +16,8 @@ scripts are the **acquisition and EPICS-deploy** half (mirror of the
 | `measure_actuator_gain_config.yml` | Parameters for `measure_actuator_gain.py`. |
 | `upload_actuation_matrix.py` | **Invert** measured actuator gains and write the ACTS matrix so each ACTS column drives the E-field in a chosen direction. `--plot-naive-comparison` also emits the naive-vs-measurement locus plot below. |
 | `upload_actuation_matrix_config.yml` | ACTS inversion config (per-column direction/coupling) for `upload_actuation_matrix.py`. |
-| `plot_naive_vs_measured_acts.py` | Polar/Cartesian E-field locus comparing the **naive** electrode diagonalization (c_x=[+1,-1,-1,+1], c_y=[+1,+1,-1,-1] phased by cos/sin θ) against the measurement-based ACTS, propagating the naive commands through the measured `A_field`. Reuses `upload_actuation_matrix.assemble()`; standalone or via `upload_actuation_matrix.py --plot-naive-comparison`. Writes to today's data folder. |
+| `plot_naive_vs_measured_acts.py` | **Step 1**: polar/Cartesian E-field locus comparing the **naive** electrode diagonalization (c_x=[+1,-1,-1,+1], c_y=[+1,+1,-1,-1] phased by cos/sin θ) against the measurement-based ACTS, propagating the naive commands through the measured `A_field`. Reuses `upload_actuation_matrix.assemble()`; standalone or via `upload_actuation_matrix.py --plot-naive-comparison`. Then calls **step 2** (`dipole_sideband_model.py`) unless `--no-sideband-model`. Writes to today's data folder. |
+| `dipole_sideband_model.py` | **Step 2**: turns the naive E-field ellipse into the dipole **libration sideband** and the headline **d-inference error** (how wrong your dipole moment is if you believe the naive COMSOL field). Co-rotating decomposition E₊/E₋, analytic ωφ=√(d\|E₊\|/I), and a numeric lab-frame EOM→PSD confirmation. Called by step 1 with the assembled `A_field`, or run standalone on an arbitrary assumed ellipse (`--semi-major/--semi-minor` or `--eplus/--eminus`). |
 | `utility.py` | Shared coordinate-system parser (direction → unit vector) used by both the ACTS and SENSE uploaders. |
 | `abort_actuator_gain.sh` | Emergency abort (touches the sentinel file; wire to an MEDM button). |
 | `tests/` | pytest suite (pure-logic) + opt-in `-m loopback` live hardware self-test. |
@@ -366,6 +367,67 @@ z couplings are measured, add `z` to `dofs:` and A becomes 3×4 with no code cha
 
 ---
 
+## `dipole_sideband_model.py` — naive E-field error → libration sideband → d bias
+
+**The question it answers.** If you drive the rotating field with the naive
+`++--`/`+--+` basis and *believe* you are delivering the clean unit circle your
+COMSOL model predicts (from the two electrode-gap length scales), how wrong is the
+libration frequency you measure — and therefore the dipole moment `d` you infer —
+once the real, asymmetric electrodes turn that command into an ellipse?
+
+**The physics** (Rider *et al.* PRA 99 041802; Afek *et al.* PRA 104 053512). A
+dipole in a field rotating at ω₀ librates about the instantaneous field at
+ωφ = √(d·E/I); the cross-polarized readout `P⊥ ~ sin²(φ)` shows a carrier at 2ω₀
+with **libration sidebands at 2ω₀ ± ωφ**. Build the effective 2×2 command→field
+matrix `M = A_xy @ [c_x | c_y]` and decompose the elliptical locus into co- and
+counter-rotating phasors `E(θ) = E₊e^{+iθ} + E₋e^{-iθ}`:
+
+- In the frame rotating at ω₀ the **static trapping field is the co-rotating
+  projection E₊**; E₋ spins at 2ω₀. So **ωφ = √(d|E₊|/I)**, set by `|E₊|`, *not*
+  by the average magnitude `⟨|E|⟩` (Q1: no — and `|E₊| ≤ ⟨|E|⟩`). The field
+  *phase* deviation matters because E₊ is a complex average (Q3: yes).
+- In the **fast regime 2ω₀ ≫ 2ωφ** (our case: ω₀/2π ~ 5–10 kHz, ωφ/2π ~ 100 Hz),
+  the 2ω₀ ripple is a Mathieu pump far off its 2ωφ resonance → no
+  splitting/broadening, only a negligible Kapitza shift and tiny micro-sidebands
+  at carrier ± 2ω₀ (Q2). It would split/broaden only near ω₀ ~ ωφ.
+
+**Headline output — `d_inferred/d_true = |E₊|_true / E_believed`** (a scale-free
+ratio of M, no V/m calibration needed), tabulated under four reductions of the
+naive belief (M assumed diagonal): x-only, y-only, average, and **best-naive**
+(project the naive ellipse, `|E₊|_naive = |M_xx+M_yy|/2`). Way 4 is the
+apples-to-apples |E₊|_naive vs |E₊|_true. An axis-aligned ellipse gives way-4
+error = 0 exactly; the residual error in real data comes from the
+off-diagonal/curl term `(M_yx−M_xy)`, which *raises* |E₊|_true (you over-estimate
+d). On the 2026-06-25 data: ε=|E₋|/|E₊|=0.26, ⟨|E|⟩/|E₊|=1.018 (the 52% ripple
+lands almost entirely in the non-trapping E₋), best-naive **d bias ≈ +5.5%**.
+
+**Numeric confirmation.** `simulate_sideband_spectrum` integrates the lab-frame
+planar-rotor EOM `I φ̈ = d(E_y cosφ − E_x sinφ) − β φ̇` with the measured naive
+field vs an ideal circle, then reads ωφ off a long single-segment `P⊥` FFT. It
+reproduces the analytic √(d|E₊|/I) (verified to <1% on the real locus and a
+circle). **Gas drag β is OFF by default** (the libration measurement is
+drag-negligible); `--drag --pressure-mbar …` turns on β = k·P for the *future*
+lock-loss study (where drag sets the loss-of-lock frequency).
+
+```
+# Step 2 runs automatically after step 1 (use --no-sideband-model to skip):
+plot_naive_vs_measured_acts.py --config upload_actuation_matrix_config.yml
+
+# Standalone, from a measured config:
+dipole_sideband_model.py --a-field-from-config upload_actuation_matrix_config.yml
+
+# Standalone, on an arbitrary assumed ellipse (no measurement):
+dipole_sideband_model.py --semi-major 1.45 --semi-minor 0.85
+```
+
+Writes `naive_vs_measured_acts_results.md` (the M, the decomposition, the d-error
+table, the fast-regime verdict, numeric-vs-analytic ωφ) and a
+`*_sideband_spectrum.png` (P⊥ PSD, naive vs circular) into the run folder.
+Defaults (d, radius/density→I, observed sideband anchor, f0, drag) come from the
+config's `dipole_sim:` block, overridable by CLI flags.
+
+---
+
 ## Testing
 ```
 cd /home/controls/labutils/scripts/dipole
@@ -383,7 +445,9 @@ shared coordinate parser (`test_utility.py`), the ACTS inversion
 γ pooling, field normalization, unit-response inversion, rotating field, uncertainty
 propagation, coupled/clear/channel-string planning), and the directional SENSE rows
 (`test_upload_sense_matrix.py`: n·W math, axis back-compat, full-sphere, subspace
-validation, regression vs the real step-01 W).
+validation, regression vs the real step-01 W), and the dipole sideband model
+(`test_dipole_sideband_model.py`: co-rotating decomposition, the four d-inference
+reductions, scale-free d-ratio, and numeric-vs-analytic ωφ).
 The loopback hardware suite additionally validates phase recovery and coherence-vs-averages
 on the live FE.
 
