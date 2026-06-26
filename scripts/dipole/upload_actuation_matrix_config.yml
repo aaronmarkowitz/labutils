@@ -176,3 +176,21 @@ columns:
 #
 # MODE 5 -- combine: e.g. XCTL/YCTL feedback (mode 2) AND a LOC/LOS rotating
 #   probe (mode 4) at once -- just list all four columns coupled.
+
+# ---------------------------------------------------------------------------
+# dipole_sim -- step 2 (dipole libration-sideband model) defaults
+# ---------------------------------------------------------------------------
+# Consumed by plot_naive_vs_measured_acts.py's step-2 hook (and the standalone
+# dipole_sideband_model.py). These set the microdiamond / regime parameters used
+# to turn the naive E-field ellipse into a libration sideband and a d-inference
+# error table. CLI flags on plot_naive_vs_measured_acts.py override these. See
+# dipole_sideband_model.py for the physics and every option.
+dipole_sim:
+  d_emum: 13.0                  # permanent dipole moment, e*um
+  radius_um: 1.5                # sphere radius -> I = (2/5) m r^2
+  density: 3510.0               # diamond density kg/m^3 (or set I: directly)
+  observed_sideband_hz: 100.0   # anchors the absolute Hz / V-m scale to recorded data
+  f0_hz: 7500.0                 # field rotation frequency (fast regime: 2 f0 >> wphi)
+  drag: false                   # gas drag OFF for the libration measurement
+  pressure_mbar: 1.0e-6         # only used when drag: true (the lock-loss study)
+  simulate: true                # run the numeric EOM->spectrum confirmation

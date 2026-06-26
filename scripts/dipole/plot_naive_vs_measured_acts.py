@@ -60,6 +60,10 @@ import matplotlib.pyplot as plt  # noqa: E402 — must follow matplotlib.use()
 # Reuse the inversion machinery (forward-matrix assembly + field normalization).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import upload_actuation_matrix as uam  # noqa: E402
+# Step 2 of this workflow: propagate the naive E-field distortion to the dipole
+# libration sideband and the d-inference error. All that physics lives in
+# dipole_sideband_model.py — see its module docstring.
+import dipole_sideband_model as dsm  # noqa: E402
 
 # Naive diagonalization sign patterns, indexed by electrode label.
 NAIVE_CX = {"E1": +1.0, "E2": -1.0, "E3": -1.0, "E4": +1.0}  # cosine / x quadrature
@@ -209,12 +213,21 @@ def build_figure(locus: dict, title: str) -> plt.Figure:
 # --------------------------------------------------------------------------- #
 def make_comparison_plot(cfg: dict, out_dir: Path, n_points: int = 361,
                          res: dict | None = None,
-                         cfg_text: str | None = None) -> tuple[Path, dict]:
+                         cfg_text: str | None = None,
+                         sideband_model: bool = True,
+                         sim_opts: dict | None = None) -> tuple[Path, dict]:
     """Assemble A_field from the config (or reuse a prior assemble() result),
     compute the naive locus, and write the figure. Returns (png_path, locus).
 
     ``cfg_text``: if given, the config YAML used for this run is saved alongside
-    the figure as ``config_used.yml`` (so a solo run is self-documenting)."""
+    the figure as ``config_used.yml`` (so a solo run is self-documenting).
+
+    ``sideband_model``: if True (default) also run **step 2** — hand the assembled
+    A_field to ``dipole_sideband_model.run_model`` to compute the libration
+    sideband, the d-inference error table, and (unless disabled in ``sim_opts``)
+    the numeric EOM spectrum. ``sim_opts`` overrides the dipole/sim defaults (see
+    ``dipole_sideband_model.run_model``); the ``dipole_sim:`` block of the config
+    supplies defaults."""
     if res is None:
         res = uam.assemble(cfg)
     A_field = res["A_field"]
@@ -248,6 +261,19 @@ def make_comparison_plot(cfg: dict, out_dir: Path, n_points: int = 361,
           f"(max/min = {locus['mag_norm'].max() / locus['mag_norm'].min():.3f})")
     print(f"    naive max pointing error    : {np.max(np.abs(err)):.1f} deg")
     print(f"    wrote: {png}")
+
+    # --- Step 2: dipole libration sideband + d-inference error ---------------
+    if sideband_model:
+        opts = dict(cfg.get("dipole_sim", {}) or {})
+        if sim_opts:
+            opts.update({k: v for k, v in sim_opts.items() if v is not None})
+        files = ", ".join(Path(fg.path).parent.name for fg in res["file_gains"])
+        M = dsm.effective_command_matrix(A_field, elec_order, dof_order)
+        print("\n  Step 2: dipole libration-sideband model "
+              "(see dipole_sideband_model.py)")
+        dsm.run_model(M, out_dir,
+                      title=f"Dipole libration-sideband model -- {files}", **opts)
+
     return png, locus
 
 
@@ -266,6 +292,18 @@ def main() -> None:
                     help="output directory (default: today's data folder)")
     ap.add_argument("--n-points", type=int, default=361,
                     help="number of theta samples around the circle (default 361)")
+    # Step 2 (dipole sideband model) toggles. Dipole/sim parameters default from
+    # the config's `dipole_sim:` block; these flags override the common ones.
+    ap.add_argument("--no-sideband-model", dest="sideband_model",
+                    action="store_false", default=True,
+                    help="skip step 2 (the dipole libration-sideband model)")
+    ap.add_argument("--no-simulate", dest="simulate", action="store_false",
+                    default=None, help="skip the numeric EOM->spectrum in step 2")
+    ap.add_argument("--drag", dest="drag", action="store_true", default=None,
+                    help="enable gas drag in step 2 (default off; for lock-loss)")
+    ap.add_argument("--d-emum", type=float, default=None)
+    ap.add_argument("--observed-sideband-hz", type=float, default=None)
+    ap.add_argument("--f0-hz", type=float, default=None)
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -280,8 +318,13 @@ def main() -> None:
     # upload_actuation_matrix.py calls make_comparison_plot directly instead.
     parent = Path(args.out_dir) if args.out_dir else _default_out_dir()
     run_dir = parent / f"{time.strftime('%Y%m%d_%H%M%S')}_naive_vs_measured_acts"
+    sim_opts = {"simulate": args.simulate, "drag": args.drag,
+                "d_emum": args.d_emum,
+                "observed_sideband_hz": args.observed_sideband_hz,
+                "f0_hz": args.f0_hz}
     try:
-        make_comparison_plot(cfg, run_dir, n_points=args.n_points, cfg_text=cfg_text)
+        make_comparison_plot(cfg, run_dir, n_points=args.n_points, cfg_text=cfg_text,
+                             sideband_model=args.sideband_model, sim_opts=sim_opts)
     except (ValueError, FileNotFoundError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
