@@ -48,7 +48,8 @@ Channels intentionally excluded from snapshot: `UVD_LASER_ON`, `UVD_TURN_OFF` (m
 | `engage_intensity_servo_x.sh` | Safely activate X laser intensity stabilization servo |
 | `disengage_intensity_servo_x.sh` | Safely deactivate X laser intensity servo |
 | `mdl_to_adl.py` | Generate MEDM .adl overview screens from Simulink .mdl models |
-| `run_thorcam.py` | Dual-camera GUI (Thorlabs + IDS) |
+| `run_thorcam.py` | Dual-camera GUI (Thorlabs + IDS). At record-stop it writes a `<video>.json` sidecar (`cameras/video_metadata.py::write_sidecar`, best-effort/never raises) with the TRUE `measured_fps` = frames/duration — the mp4 container fps is only a fixed nominal (acquisition setting), so analysis (`analysis/…/video_thermal_asd.py`) prefers the sidecar for length calibration. |
+| `cameras/video_metadata.py` | JSON video-sidecar writer (stdlib-only); records measured_fps, n_frames, duration, ROI for recorded clips. |
 | `run_leybold_turbolab.py` | Leybold turbo pump monitoring with EPICS |
 | `fetch_nds2_data.py` | NDS2 data fetching (server 192.168.1.11:8088) |
 | `scripts/dipole/upload_sense_matrix.py` | Upload a sensor (SENSE) matrix to EPICS from pipeline step_01 HDF5. Also force-enables the input filter modules feeding each written column (a zeroed input silently deletes a W column → PARTICLE_X/Y collapse onto the same mode). W carries a per-mode displacement calibration set by step-01 `common_unit_anchor` (default `equipartition`, the physical choice for the actuator chain — NOT `white_force` with per-mode Γ). |

@@ -19,6 +19,11 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 
+try:
+    from video_metadata import write_sidecar
+except ImportError:
+    from cameras.video_metadata import write_sidecar
+
 # Import Thorlabs SDK
 try:
     from thorlabs_tsi_sdk.tl_camera import TLCameraSDK, TLCamera
@@ -1622,6 +1627,7 @@ class ThorlabsCameraApp(QMainWindow):
                 cam_instance.record_button.setText("Start Recording")
                 cam_instance.recording_label.setText("Not Recording")
                 cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
+                self._write_video_sidecar(cam_instance)
 
         # Display
         if overlay_image is not None:
@@ -1763,6 +1769,9 @@ class ThorlabsCameraApp(QMainWindow):
                         if cam_instance.video_writer.isOpened():
                             cam_instance.recording = True
                             cam_instance.recording_start_time = time.time()
+                            # Stash for the metadata sidecar written at stop.
+                            cam_instance.recording_filename = filename
+                            cam_instance.recording_dims = (width, height)
                             # Initialize recording limits
                             cam_instance.record_duration_limit = cam_instance.duration_spinbox.value()
                             cam_instance.record_frame_limit = cam_instance.framecount_spinbox.value()
@@ -1796,6 +1805,27 @@ class ThorlabsCameraApp(QMainWindow):
             cam_instance.record_button.setText("Start Recording")
             cam_instance.recording_label.setText("Not Recording")
             cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
+            self._write_video_sidecar(cam_instance)
+
+    def _write_video_sidecar(self, cam_instance):
+        """Best-effort JSON sidecar with the TRUE measured fps (frames/duration).
+        Wrapped so it can never disturb recording/streaming (write_sidecar itself
+        also never raises)."""
+        try:
+            fn = getattr(cam_instance, "recording_filename", None)
+            if not fn:
+                return
+            dims = getattr(cam_instance, "recording_dims", (None, None))
+            write_sidecar(
+                fn, getattr(cam_instance, "recorded_frame_count", 0),
+                getattr(cam_instance, "recording_start_time", None), time.time(),
+                camera=getattr(cam_instance, "name", None),
+                width=dims[0], height=dims[1],
+                nominal_fps=getattr(cam_instance, "fps", None),
+            )
+            cam_instance.recording_filename = None
+        except Exception as e:
+            print(f"WARNING: video sidecar failed: {e}")
     
     def show_error(self, title, message):
         """Display an error dialog with the given title and message"""
