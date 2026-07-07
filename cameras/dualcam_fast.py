@@ -43,6 +43,12 @@ except ImportError as e:
     _ueye_mod = None
     print(f"pyueye not available; IDS cameras disabled: {e}")
 
+# JSON video sidecar writer (stdlib-only, best-effort; never raises).
+try:
+    import video_metadata
+except ImportError:
+    from cameras import video_metadata
+
 class CameraLabel(QLabel):
     """QLabel subclass that supports click-and-drag repositioning of markup overlays."""
 
@@ -213,6 +219,146 @@ def build_ids_rect(x, y, w, h):
     return rect
 
 
+# Fraction of the frame period the exposure may occupy before it must be reduced
+# to let the requested frame rate be achievable (leaves headroom for readout).
+_EXPOSURE_DUTY_MAX = 0.98
+
+
+def clamp_fps_exposure(fps, exposure_ms, fps_min, fps_max):
+    """Reconcile a requested frame rate and exposure for a camera.
+
+    Encodes two coupled hardware constraints in one testable unit:
+      1. Range clamp: fps is clamped to [fps_min, fps_max]. If fps_max <= 0 the
+         camera does not report a usable range (e.g. model without frame-rate
+         control), so the requested fps is passed through unchanged.
+      2. Exposure/period coupling: exposure must fit inside the frame period or
+         it caps the achievable rate. If exposure_ms exceeds
+         _EXPOSURE_DUTY_MAX * (1000 / fps), it is reduced to that bound.
+
+    Returns (fps, exposure_ms, warn) where warn is a human-readable string when a
+    value was changed, else None.
+    """
+    warns = []
+    fps = float(fps)
+    exposure_ms = float(exposure_ms)
+
+    if fps_max and fps_max > 0:
+        clamped = min(max(fps, fps_min), fps_max)
+        if clamped != fps:
+            warns.append(f"fps {fps:g} clamped to [{fps_min:g}, {fps_max:g}] "
+                         f"-> {clamped:g}")
+            fps = clamped
+
+    if fps > 0:
+        max_exposure_ms = _EXPOSURE_DUTY_MAX * (1000.0 / fps)
+        if exposure_ms > max_exposure_ms:
+            warns.append(f"exposure {exposure_ms:g}ms reduced to "
+                         f"{max_exposure_ms:.3g}ms to fit {fps:g} fps")
+            exposure_ms = max_exposure_ms
+
+    return fps, exposure_ms, ("; ".join(warns) if warns else None)
+
+
+def summarize_frame_info(hw_frame_count, hw_timestamp_ns):
+    """Derive drop count and a leakage-free frame rate from hardware frame info.
+
+    hw_frame_count : per-frame hardware frame numbers (monotonically increasing,
+        one per delivered frame). Gaps > 1 indicate frames the camera captured
+        but the host never received — GENUINE drops, distinct from late dequeues.
+    hw_timestamp_ns : per-frame hardware timestamps in nanoseconds (or None/NaN
+        entries where the model does not report them).
+
+    Returns dict: {dropped, n_frames, hw_fps, hw_span_s}. hw_fps is computed from
+    the hardware timestamps (mean interval) and is the leakage-free clock; it is
+    None if fewer than 2 valid timestamps are available.
+    """
+    fc = np.asarray(hw_frame_count, dtype=np.float64)
+    fc = fc[np.isfinite(fc)]
+    dropped = 0
+    if fc.size >= 2:
+        diffs = np.diff(fc)
+        gaps = diffs[diffs > 1]
+        dropped = int(np.sum(gaps - 1))
+
+    ts = np.asarray(hw_timestamp_ns, dtype=np.float64)
+    ts = ts[np.isfinite(ts)]
+    ts = ts[ts >= 0]  # sentinel for "unsupported" frames
+    hw_fps = None
+    hw_span_s = None
+    if ts.size >= 2:
+        span_ns = ts[-1] - ts[0]
+        if span_ns > 0:
+            hw_span_s = span_ns / 1e9
+            hw_fps = (ts.size - 1) / hw_span_s
+
+    return {
+        "dropped": dropped,
+        "n_frames": int(np.asarray(hw_frame_count).size),
+        "hw_fps": hw_fps,
+        "hw_span_s": hw_span_s,
+    }
+
+
+def write_recording_sidecars(rec_file, sw_timestamps, hw_frames, hw_timestamps_ns,
+                             ring_in_use, *, start_unix, stop_unix, camera,
+                             width, height, nominal_fps):
+    """Write the three recording sidecars and return summary stats (or None).
+
+    Writes (next to <rec_file>):
+      * <stem>_timestamps.npy  — software monotonic grab-times (back-compat)
+      * <stem>_hwclock.npz     — hardware frame clock + software clock + ring trace
+      * <stem>.json            — video_metadata sidecar; measured_fps prefers the
+                                 leakage-free HARDWARE clock, plus drop count.
+
+    Returns {n, sw_fps, hw_fps, dropped, ring_peak} or None if < 2 frames.
+    Never raises on I/O — file errors are printed and swallowed (like write_sidecar).
+    """
+    ts = list(sw_timestamps)
+    n = len(ts)
+    if n < 2:
+        return None
+
+    span = ts[-1] - ts[0]
+    sw_fps = (n - 1) / span if span > 0 else 0.0
+
+    hw_frames = np.asarray(hw_frames, dtype=np.float64)
+    hw_ts_ns = np.asarray(hw_timestamps_ns, dtype=np.float64)
+    ring = np.asarray(ring_in_use, dtype=np.float64)
+    summary = summarize_frame_info(hw_frames, hw_ts_ns)
+    hw_fps = summary["hw_fps"]
+    dropped = summary["dropped"]
+    ring_peak = int(np.nanmax(ring)) if ring.size else 0
+
+    print(f"{camera}: recorded {n} frames over {span:.3f}s "
+          f"| sw_fps={sw_fps:.1f} hw_fps={hw_fps if hw_fps else float('nan'):.1f} "
+          f"| genuine drops={dropped} | ring peak={ring_peak}")
+
+    try:
+        if rec_file:
+            stem = os.path.splitext(rec_file)[0]
+            np.save(stem + '_timestamps.npy', np.array(ts))
+            np.savez(stem + '_hwclock.npz',
+                     sw_monotonic=np.array(ts),
+                     hw_frame_count=hw_frames,
+                     hw_timestamp_ns=hw_ts_ns,
+                     ring_in_use=ring)
+            video_metadata.write_sidecar(
+                rec_file, n, start_unix=start_unix, stop_unix=stop_unix,
+                camera=camera, width=width, height=height, nominal_fps=nominal_fps,
+                extra={
+                    "hw_measured_fps": hw_fps,
+                    "sw_measured_fps": sw_fps,
+                    "dropped_frames": dropped,
+                    "ring_peak_in_use": ring_peak,
+                    "schema": "mastqg.video_sidecar.v2",
+                })
+    except Exception as e:
+        print(f"Error saving recording sidecars: {e}")
+
+    return {"n": n, "sw_fps": sw_fps, "hw_fps": hw_fps,
+            "dropped": dropped, "ring_peak": ring_peak}
+
+
 class CameraInstance:
     """Class to store state and controls for each camera"""
     def __init__(self, name="Camera"):
@@ -262,14 +408,44 @@ class CameraInstance:
         self.current_frame_h = 0  # active capture height; updated on connect and ROI change
         # Recording timestamps (monotonic); appended per frame; reset on each new recording
         self._rec_timestamps = []
+        # Hardware frame clock captured per recorded frame (leakage-free; detects
+        # genuine drops vs late software dequeues). Reset on each new recording.
+        self._rec_hw_frames = []      # hardware frame counter per frame
+        self._rec_hw_timestamps = []  # hardware device timestamp (ns) per frame
+        self._rec_ring_in_use = []    # IDS ring occupancy per frame (backpressure)
         self._rec_filename = ''  # path of current/last recording file
 
 class IDSFrame:
-    """Duck-type match for Thorlabs frame; holds captured pixel data."""
-    def __init__(self, data: np.ndarray, width: int, height: int):
+    """Duck-type match for Thorlabs frame; holds captured pixel data.
+
+    hw_frame_count / hw_timestamp_ns / buffers_in_use are the hardware frame
+    number, device timestamp (ns) and ring occupancy captured from
+    is_GetImageInfo. They default to None so the duck-type stays compatible with
+    the Thorlabs Frame (which exposes frame_count / time_stamp_relative_ns_or_null
+    directly). Populated only during recording (see IDSCamera capture-attach).
+    """
+    def __init__(self, data: np.ndarray, width: int, height: int,
+                 hw_frame_count=None, hw_timestamp_ns=None, buffers_in_use=None):
         self.image_buffer = data                              # 1-D uint8 numpy array
         self.image_buffer_size_pixels_horizontal = width
         self.image_buffer_size_pixels_vertical   = height
+        self.hw_frame_count  = hw_frame_count
+        self.hw_timestamp_ns = hw_timestamp_ns
+        self.buffers_in_use  = buffers_in_use
+
+
+# IDS uEye image-queue ring depth. The original code hardcoded 3, which under
+# USB bandwidth pressure is a plausible source of the isolated frame stalls seen
+# in issue #4 (vs the Thorlabs 30-buffer pool). A deeper ring absorbs host-side
+# dequeue latency without dropping frames. Named so it is trivial to tune live.
+IDS_RING_BUFFERS = 12
+
+# The display refresh is decoupled from capture: the sensor may free-run at
+# 200 fps but the GUI only needs ~30 fps of on-screen updates. Repainting at the
+# full capture rate wastes CPU and adds display-thread contention that itself
+# worsens the software dequeue jitter in the acquisition loop. The recording
+# path still writes EVERY captured frame regardless of this cap.
+DISPLAY_FPS_CAP = 30
 
 
 class IDSCamera:
@@ -277,11 +453,18 @@ class IDSCamera:
 
     IS_USE_DEVICE_ID = 0x8000
 
-    def __init__(self, device_id: int):
+    def __init__(self, device_id: int, n_buffers: int = IDS_RING_BUFFERS):
         from pyueye import ueye
         self._ue = ueye
         self._pending_frame = None
         self._last_seq_num = -1  # Track frame sequence to avoid counting duplicates
+        self._n_buffers = max(3, int(n_buffers))
+        # Cache of the last commanded frame rate so it can be re-applied after an
+        # AOI change (is_SetFrameRate does not survive re-arm). None = not set.
+        self._frame_rate = None
+        # When True, capture per-frame hardware info (is_GetImageInfo) — enabled
+        # only during recording so the free-run display path pays no extra cost.
+        self.capture_hw_info = False
 
         # Open camera by physical device ID
         self._hCam = ctypes.c_uint(device_id | self.IS_USE_DEVICE_ID)
@@ -313,7 +496,7 @@ class IDSCamera:
         # Allocate multiple image buffers for queue mode (allows non-blocking polling)
         self._mem_ptrs = []
         self._mem_ids = []
-        for i in range(3):  # 3 buffers for smooth queue operation
+        for i in range(self._n_buffers):  # deeper ring absorbs host dequeue latency
             mem_ptr = ueye.c_mem_p()
             mem_id = ctypes.c_int()
             ret = ueye.is_AllocImageMem(
@@ -369,8 +552,13 @@ class IDSCamera:
             exp_ms,
             ctypes.sizeof(exp_ms))
 
-    def arm(self, n_buffers=2):
-        # Freerun mode: camera delivers frames continuously; event-driven wait in acquisition loop
+    def arm(self, n_buffers=None):
+        # Freerun mode: camera delivers frames continuously; event-driven wait in acquisition loop.
+        # n_buffers, when given and different from the current ring depth, re-allocates
+        # the image queue (was previously ignored — the ring was fixed at 3).
+        if n_buffers is not None and max(3, int(n_buffers)) != self._n_buffers:
+            self._realloc_buffers(max(3, int(n_buffers)))
+
         ret = self._ue.is_SetExternalTrigger(self._hCam, self._ue.IS_SET_TRIGGER_OFF)
         if ret != self._ue.IS_SUCCESS:
             raise RuntimeError(f"is_SetExternalTrigger(OFF/freerun) failed: {ret}")
@@ -379,6 +567,39 @@ class IDSCamera:
         ret = self._ue.is_CaptureVideo(self._hCam, self._ue.IS_DONT_WAIT)
         if ret != self._ue.IS_SUCCESS:
             raise RuntimeError(f"is_CaptureVideo failed: {ret}")
+
+        # Re-apply the commanded frame rate — freerun rate resets on re-arm.
+        if self._frame_rate:
+            self.set_frame_rate(self._frame_rate)
+
+    def _realloc_buffers(self, n_buffers):
+        """Free and re-allocate the image queue to `n_buffers` at the current AOI.
+
+        Caller must ensure live video is stopped. Used to honor a changed ring
+        depth from arm().
+        """
+        ue = self._ue
+        ue.is_StopLiveVideo(self._hCam, ue.IS_FORCE_VIDEO_STOP)
+        ue.is_ClearSequence(self._hCam)
+        for mem_ptr, mem_id in zip(self._mem_ptrs, self._mem_ids):
+            ue.is_FreeImageMem(self._hCam, mem_ptr, mem_id)
+        self._mem_ptrs.clear()
+        self._mem_ids.clear()
+        for i in range(n_buffers):
+            mem_ptr = ue.c_mem_p()
+            mem_id = ctypes.c_int()
+            ret = ue.is_AllocImageMem(self._hCam, self._current_w, self._current_h,
+                                      8, mem_ptr, mem_id)
+            if ret != ue.IS_SUCCESS:
+                raise RuntimeError(f"is_AllocImageMem (realloc) failed on buffer {i}: {ret}")
+            ret = ue.is_AddToSequence(self._hCam, mem_ptr, mem_id)
+            if ret != ue.IS_SUCCESS:
+                raise RuntimeError(f"is_AddToSequence (realloc) failed on buffer {i}: {ret}")
+            self._mem_ptrs.append(mem_ptr)
+            self._mem_ids.append(mem_id)
+        self._mem_ptr = self._mem_ptrs[0]
+        self._mem_id = self._mem_ids[0]
+        self._n_buffers = n_buffers
 
     def disarm(self):
         self._ue.is_StopLiveVideo(self._hCam, self._ue.IS_FORCE_VIDEO_STOP)
@@ -424,10 +645,34 @@ class IDSCamera:
         w, h = self._current_w, self._current_h
         raw = self._ue.get_data(pcMemLast, w, h, 8, self._pitch, copy=True)
         frame_np = reshape_ids_frame(raw, w, h, self._pitch)
-        self._pending_frame = IDSFrame(frame_np.ravel(), w, h)
+        hw_fc, hw_ts, in_use = self._read_image_info(nNum.value)
+        self._pending_frame = IDSFrame(frame_np.ravel(), w, h,
+                                       hw_frame_count=hw_fc, hw_timestamp_ns=hw_ts,
+                                       buffers_in_use=in_use)
 
         # Unlock the buffer so it can be reused
         self._ue.is_UnlockSeqBuf(self._hCam, nNum, pcMemLast)
+
+    def _read_image_info(self, mem_id):
+        """Return (hw_frame_count, hw_timestamp_ns, buffers_in_use) for a buffer.
+
+        Uses is_GetImageInfo -> UEYEIMAGEINFO. Only queried when capture_hw_info is
+        set (recording), otherwise returns (None, None, None) so the free-run
+        display path pays no cost. Never raises — returns Nones on any failure.
+        """
+        if not self.capture_hw_info:
+            return None, None, None
+        try:
+            info = self._ue.UEYEIMAGEINFO()
+            ret = self._ue.is_GetImageInfo(self._hCam, ctypes.c_int(mem_id),
+                                           info, ctypes.sizeof(info))
+            if ret != self._ue.IS_SUCCESS:
+                return None, None, None
+            # u64TimestampDevice is in 100ns ticks (uEye convention) -> ns.
+            ts_ns = int(info.u64TimestampDevice) * 100
+            return int(info.u64FrameNumber), ts_ns, int(info.dwImageBuffersInUse)
+        except Exception:
+            return None, None, None
 
     def get_pending_frame_or_null(self):
         frame, self._pending_frame = self._pending_frame, None
@@ -464,7 +709,10 @@ class IDSCamera:
         w, h = self._current_w, self._current_h
         raw = self._ue.get_data(pcMemLast, w, h, 8, self._pitch, copy=True)
         frame_np = reshape_ids_frame(raw, w, h, self._pitch)
-        frame = IDSFrame(frame_np.ravel(), w, h)
+        hw_fc, hw_ts, in_use = self._read_image_info(nNum.value)
+        frame = IDSFrame(frame_np.ravel(), w, h,
+                         hw_frame_count=hw_fc, hw_timestamp_ns=hw_ts,
+                         buffers_in_use=in_use)
         self._ue.is_UnlockSeqBuf(self._hCam, nNum, pcMemLast)
         return frame
 
@@ -506,8 +754,8 @@ class IDSCamera:
         self._current_w = w
         self._current_h = h
 
-        # 7. Allocate 3 new buffers sized to AOI
-        for i in range(3):
+        # 7. Allocate new buffers sized to AOI (same ring depth as at init)
+        for i in range(self._n_buffers):
             mem_ptr = ue.c_mem_p()
             mem_id = ctypes.c_int()
             ret = ue.is_AllocImageMem(self._hCam, w, h, 8, mem_ptr, mem_id)
@@ -539,6 +787,10 @@ class IDSCamera:
         ret = ue.is_CaptureVideo(self._hCam, ue.IS_DONT_WAIT)
         if ret != ue.IS_SUCCESS:
             raise RuntimeError(f"is_CaptureVideo after AOI failed: {ret}")
+
+        # 11. Re-apply commanded frame rate — freerun rate is reset by re-arm.
+        if self._frame_rate:
+            self.set_frame_rate(self._frame_rate)
 
         self._last_seq_num = -1
 
@@ -572,6 +824,47 @@ class IDSCamera:
             self._hCam, self._ue.IS_PIXELCLOCK_CMD_SET, val, ctypes.sizeof(val))
         if ret != self._ue.IS_SUCCESS:
             raise RuntimeError(f"is_PixelClock SET {mhz} MHz failed: {ret}")
+
+    # ── Frame-rate control (freerun) ─────────────────────────────────────
+    # In freerun (trigger OFF + capture on — the state arm()/set_aoi() leave the
+    # camera in) the frame rate can be commanded with is_SetFrameRate. It must be
+    # re-issued after any re-arm (arm/set_aoi do this via self._frame_rate).
+
+    def get_frame_rate_range(self):
+        """Return (fps_min, fps_max) achievable at the current pixel-clock/AOI.
+
+        is_GetFrameTimeRange returns frame *times* (seconds), so the fps bounds
+        are the inverse: fps_max = 1/t_min, fps_min = 1/t_max. Returns (0.0, 0.0)
+        on failure (caller treats fps_max<=0 as "no usable range").
+        """
+        t_min = ctypes.c_double()
+        t_max = ctypes.c_double()
+        t_intv = ctypes.c_double()
+        ret = self._ue.is_GetFrameTimeRange(self._hCam, t_min, t_max, t_intv)
+        if ret != self._ue.IS_SUCCESS or t_min.value <= 0 or t_max.value <= 0:
+            return 0.0, 0.0
+        return 1.0 / t_max.value, 1.0 / t_min.value
+
+    def set_frame_rate(self, fps):
+        """Command a fixed freerun frame rate; return the achieved rate.
+
+        The SDK snaps to the nearest achievable rate and writes it into newFPS.
+        Caches the request so arm()/set_aoi() can re-apply it after re-arm.
+        """
+        self._frame_rate = float(fps)
+        new_fps = ctypes.c_double()
+        ret = self._ue.is_SetFrameRate(self._hCam, ctypes.c_double(float(fps)), new_fps)
+        if ret != self._ue.IS_SUCCESS:
+            raise RuntimeError(f"is_SetFrameRate({fps}) failed: {ret}")
+        return new_fps.value
+
+    def get_measured_frame_rate_fps(self):
+        """Live measured frame rate (duck-type match for Thorlabs)."""
+        fps = ctypes.c_double()
+        ret = self._ue.is_GetFramesPerSecond(self._hCam, fps)
+        if ret != self._ue.IS_SUCCESS:
+            return 0.0
+        return fps.value
 
 
 class ThorlabsCameraApp(QMainWindow):
@@ -1382,6 +1675,22 @@ class ThorlabsCameraApp(QMainWindow):
                             cam_instance.video_writer.write(bgr)
                             cam_instance.recorded_frame_count += 1
                             cam_instance._rec_timestamps.append(time.monotonic())
+                            # Hardware frame clock: Thorlabs Frame carries
+                            # frame_count / time_stamp_relative_ns_or_null directly;
+                            # IDSFrame carries hw_frame_count / hw_timestamp_ns from
+                            # is_GetImageInfo. Missing values -> NaN sentinel.
+                            fc = getattr(frame, 'hw_frame_count', None)
+                            if fc is None:
+                                fc = getattr(frame, 'frame_count', None)
+                            ts = getattr(frame, 'hw_timestamp_ns', None)
+                            if ts is None:
+                                ts = getattr(frame, 'time_stamp_relative_ns_or_null', None)
+                            cam_instance._rec_hw_frames.append(
+                                float('nan') if fc is None else fc)
+                            cam_instance._rec_hw_timestamps.append(
+                                float('nan') if ts is None else ts)
+                            cam_instance._rec_ring_in_use.append(
+                                getattr(frame, 'buffers_in_use', None) or 0)
                             duration = time.monotonic() - cam_instance.recording_start_time
                             if ((cam_instance.record_duration_limit > 0 and
                                      duration >= cam_instance.record_duration_limit) or
@@ -1565,10 +1874,11 @@ class ThorlabsCameraApp(QMainWindow):
                 # Start the camera
                 with cam_instance.camera_lock:
                     print(f"Arming camera {device_id}")
-                    # Use many more buffers for Thorlabs to reduce SDK memory pressure
-                    num_buffers = 30 if cam_type == 'thorlabs' else 2
+                    # Thorlabs: large SDK pool. IDS: already allocated IDS_RING_BUFFERS
+                    # at construction — pass None so arm() keeps that ring (don't shrink it).
+                    num_buffers = 30 if cam_type == 'thorlabs' else None
                     cam_instance.camera.arm(num_buffers)
-                    print(f"Armed with {num_buffers} buffers")
+                    print(f"Armed with {num_buffers if num_buffers else IDS_RING_BUFFERS} buffers")
                     time.sleep(0.2)  # Short delay after arming
                     # Continuous mode: one software trigger starts the stream; acquisition
                     # loop consumes frames with get_pending_frame_or_null() — no re-triggering.
@@ -1617,6 +1927,14 @@ class ThorlabsCameraApp(QMainWindow):
                 except Exception as e:
                     print(f"Could not read pixel clock info for {cam_instance.name}: {e}")
 
+            # Command the initial hardware frame rate (default fps) now that the
+            # camera is armed — otherwise it free-runs at its ROI-dependent max.
+            with cam_instance.camera_lock:
+                try:
+                    self._apply_fps_exposure(cam_instance, cam_instance.fps)
+                except Exception as e:
+                    print(f"Initial frame-rate apply failed for {cam_instance.name}: {e}")
+
             # Start per-camera acquisition thread
             cam_instance.stale_detected.clear()
             cam_instance.acq_stop_event.clear()
@@ -1645,14 +1963,8 @@ class ThorlabsCameraApp(QMainWindow):
             except Exception as e:
                 cam_instance.debug_label.setText(f"Camera info error: {str(e)}")
             
-            # Start the timer if it's not already running
-            # Use variable display rate based on camera FPS settings
-            interval = int(1000 / max(
-                self.cameras["cam1"].fps if self.cameras["cam1"].camera else 1,
-                self.cameras["cam2"].fps if self.cameras["cam2"].camera else 1))
-            if not self.timer.isActive():
-                print(f"Starting timer with interval {interval}ms")
-                self.timer.start(interval)
+            # Start the display refresh timer (decoupled from capture rate).
+            self._ensure_display_timer()
             cam_instance.panel_widget.setVisible(True)
 
             msg = f"{cam_instance.name} connected successfully"
@@ -1669,8 +1981,7 @@ class ThorlabsCameraApp(QMainWindow):
             
             # Restore timer if it was active
             if timer_was_active and not self.timer.isActive():
-                self.timer.start(int(1000 / max(self.cameras["cam1"].fps if self.cameras["cam1"].camera else 30, 
-                                              self.cameras["cam2"].fps if self.cameras["cam2"].camera else 30)))
+                self._ensure_display_timer()
                 
     def safe_camera_operation(self, func, *args, **kwargs):
         """Execute a function with proper locking to ensure thread safety"""
@@ -1817,6 +2128,7 @@ class ThorlabsCameraApp(QMainWindow):
         overlay_image = self.apply_overlays(cam_instance, image)
 
         # Update recording label (frame writes happen in acquisition thread)
+        auto_stopped = False
         with cam_instance.video_lock:
             if cam_instance.recording and cam_instance.video_writer:
                 duration = time.time() - cam_instance.recording_start_time
@@ -1824,12 +2136,21 @@ class ThorlabsCameraApp(QMainWindow):
                     f"Recording: {duration:.1f}s, "
                     f"Frames: {cam_instance.recorded_frame_count}")
             elif not cam_instance.recording and cam_instance.video_writer:
-                # Auto-stop was triggered by acquisition thread
+                # Auto-stop was triggered by acquisition thread (duration/frame limit)
                 cam_instance.video_writer.release()
                 cam_instance.video_writer = None
                 cam_instance.record_button.setText("Start Recording")
-                cam_instance.recording_label.setText("Not Recording")
-                cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
+                auto_stopped = True
+        if auto_stopped:
+            # Disable IDS hw-info capture and write the same sidecars as a manual stop.
+            if cam_instance.cam_type == 'ids_ueye' and cam_instance.camera:
+                try:
+                    cam_instance.camera.capture_hw_info = False
+                except Exception:
+                    pass
+            status_msg = self._finalize_recording(cam_instance, time.time())
+            cam_instance.status_label.setText(
+                status_msg or f"Recording stopped - {cam_instance.name}")
 
         # Display
         if overlay_image is not None:
@@ -1913,29 +2234,138 @@ class ThorlabsCameraApp(QMainWindow):
         cam_instance.framerate_value.blockSignals(False)
         self.set_framerate(cam_id, fps)
     
+    def _ensure_display_timer(self):
+        """Run the display refresh timer at DISPLAY_FPS_CAP while any camera is
+        connected, else stop it. Independent of capture fps (see DISPLAY_FPS_CAP)."""
+        any_connected = any(c.camera for c in self.cameras.values())
+        if any_connected:
+            interval = int(1000 / DISPLAY_FPS_CAP)
+            if self.timer.isActive():
+                self.timer.stop()
+            self.timer.start(interval)
+        elif self.timer.isActive():
+            self.timer.stop()
+
+    def _thorlabs_set_frame_rate(self, cam, fps):
+        """Enable + set Thorlabs hardware frame-rate control; return achieved fps.
+
+        No-op (returns None) on models that don't support it (range.max <= 0).
+        """
+        try:
+            rng = cam.frame_rate_control_value_range
+        except Exception as e:
+            print(f"Thorlabs frame_rate_control_value_range unavailable: {e}")
+            return None
+        fmax = getattr(rng, 'max', 0) or 0
+        fmin = getattr(rng, 'min', 0) or 0
+        if fmax <= 0:
+            print("Thorlabs: model does not support frame-rate control; leaving free-run")
+            return None
+        target = min(max(float(fps), fmin), fmax)
+        cam.is_frame_rate_control_enabled = True
+        cam.frame_rate_control_value = target
+        return target
+
+    def _apply_fps_exposure(self, cam_instance, fps):
+        """Command a fixed hardware frame rate on a connected camera and reconcile
+        exposure to fit the frame period. Returns (achieved_fps, warn_or_None).
+
+        Dispatches by cam_type. Caller must hold camera_lock. Safe to call for
+        either camera type; a model without frame-rate support is left free-run.
+        """
+        cam = cam_instance.camera
+        if cam is None:
+            return None, None
+
+        # Query the achievable range so we can clamp fps + exposure sensibly.
+        fps_min, fps_max = 1.0, 0.0
+        if cam_instance.cam_type == 'ids_ueye':
+            try:
+                fps_min, fps_max = cam.get_frame_rate_range()
+            except Exception:
+                fps_min, fps_max = 1.0, 0.0
+        elif cam_instance.cam_type == 'thorlabs':
+            try:
+                rng = cam.frame_rate_control_value_range
+                fps_min = getattr(rng, 'min', 1.0) or 1.0
+                fps_max = getattr(rng, 'max', 0.0) or 0.0
+            except Exception:
+                fps_min, fps_max = 1.0, 0.0
+
+        fps, exposure_ms, warn = clamp_fps_exposure(
+            fps, cam_instance.exposure_ms, fps_min, fps_max)
+
+        # Apply frame rate first (defines the period), then exposure to fit it.
+        achieved = None
+        if cam_instance.cam_type == 'ids_ueye':
+            achieved = cam.set_frame_rate(fps)
+        elif cam_instance.cam_type == 'thorlabs':
+            achieved = self._thorlabs_set_frame_rate(cam, fps)
+
+        # Reconcile exposure (both SDKs: exposure setter takes μs here).
+        if exposure_ms != cam_instance.exposure_ms:
+            cam_instance.exposure_ms = exposure_ms
+        try:
+            cam.exposure_time_us = int(exposure_ms * 1000)
+        except Exception as e:
+            print(f"Exposure re-apply failed: {e}")
+
+        return achieved, warn
+
+    def _reapply_camera_settings(self, cam_instance):
+        """Re-apply {frame rate, exposure} after a re-arm so they survive ROI changes.
+
+        is_SetFrameRate / Thorlabs frame-rate control do NOT persist across the
+        disarm+arm cycle an ROI change performs, so any commanded fps must be
+        re-issued afterwards. Caller must hold camera_lock. Best-effort.
+        """
+        if cam_instance.camera is None:
+            return
+        try:
+            self._apply_fps_exposure(cam_instance, cam_instance.fps)
+        except Exception as e:
+            print(f"Re-apply camera settings failed for {cam_instance.name}: {e}")
+
     def set_framerate(self, cam_id, fps):
-        """Set framerate for a specific camera"""
+        """Command a fixed hardware frame rate for a camera (not just the display).
+
+        Previously this only restarted the display timer; the sensor free-ran at
+        its ROI-dependent max. Now it issues the real SDK frame-rate command and
+        reconciles exposure, keeping the display timer decoupled at DISPLAY_FPS_CAP.
+        """
         cam_instance = self.cameras[cam_id]
         cam_instance.fps = fps
-        
-        # Update the timer to use the faster of the two cameras' framerates
-        if self.cameras["cam1"].camera or self.cameras["cam2"].camera:
-            max_fps = max(
-                self.cameras["cam1"].fps if self.cameras["cam1"].camera else 0,
-                self.cameras["cam2"].fps if self.cameras["cam2"].camera else 0
-            )
-            if max_fps > 0:
-                if self.timer.isActive():
-                    self.timer.stop()
-                self.timer.start(int(1000 / max_fps))
-        
-        cam_instance.status_label.setText(f"Frame rate set to {fps} FPS")
+
+        if cam_instance.camera:
+            try:
+                with cam_instance.camera_lock:
+                    achieved, warn = self._apply_fps_exposure(cam_instance, fps)
+                if achieved is not None:
+                    msg = f"Frame rate → {achieved:.1f} fps (requested {fps})"
+                else:
+                    msg = f"Frame rate {fps} fps requested (hardware control unavailable)"
+                if warn:
+                    msg += f" [{warn}]"
+                cam_instance.status_label.setText(msg)
+                print(f"{cam_instance.name}: {msg}")
+            except Exception as e:
+                error_msg = f"Error setting frame rate: {e}"
+                print(error_msg)
+                if self.debug_checkbox.isChecked():
+                    traceback.print_exc()
+                cam_instance.status_label.setText(error_msg)
+        else:
+            cam_instance.status_label.setText(f"Frame rate set to {fps} FPS (not connected)")
+
+        # Display refresh is decoupled from capture rate.
+        self._ensure_display_timer()
+
         # Update slider if value was changed directly
         if cam_instance.framerate_slider.value() != fps:
             cam_instance.framerate_slider.blockSignals(True)
             cam_instance.framerate_slider.setValue(fps)
             cam_instance.framerate_slider.blockSignals(False)
-    
+
     def apply_roi(self, cam_id):
         """Stop acquisition, apply ROI to camera, restart acquisition thread."""
         cam_instance = self.cameras[cam_id]
@@ -1996,6 +2426,9 @@ class ThorlabsCameraApp(QMainWindow):
                     x, y = applied.upper_left_x_pixels, applied.upper_left_y_pixels
                     print(f"Thorlabs ROI applied by SDK: {w}×{h} at ({x},{y})")
 
+                # Re-apply commanded fps/exposure — the re-arm above resets them.
+                self._reapply_camera_settings(cam_instance)
+
             # Flush stale frame before updating dimensions — prevents display thread from
             # reshaping an old full-frame buffer using the new smaller ROI dimensions.
             with cam_instance.frame_lock:
@@ -2049,6 +2482,9 @@ class ThorlabsCameraApp(QMainWindow):
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
                     cam_instance.camera.issue_software_trigger()  # start continuous stream
+
+                # Re-apply commanded fps/exposure — the re-arm above resets them.
+                self._reapply_camera_settings(cam_instance)
 
             with cam_instance.frame_lock:
                 cam_instance.pending_frame = None
@@ -2114,6 +2550,13 @@ class ThorlabsCameraApp(QMainWindow):
                             cam_instance.record_frame_limit = cam_instance.framecount_spinbox.value()
                             cam_instance.recorded_frame_count = 0
                             cam_instance._rec_timestamps = []  # reset for new recording
+                            cam_instance._rec_hw_frames = []
+                            cam_instance._rec_hw_timestamps = []
+                            cam_instance._rec_ring_in_use = []
+                            # Enable per-frame hardware-info capture on IDS while recording
+                            # (Thorlabs Frame carries it for free; IDS pays a small cost).
+                            if cam_instance.cam_type == 'ids_ueye' and cam_instance.camera:
+                                cam_instance.camera.capture_hw_info = True
                         else:
                             cam_instance.video_writer = None
                     if cam_instance.recording:
@@ -2140,32 +2583,45 @@ class ThorlabsCameraApp(QMainWindow):
                         print(f"Error releasing video writer: {e}")
                     cam_instance.video_writer = None
                 cam_instance.recording = False
-            cam_instance.record_button.setText("Start Recording")
-            # Report measured recording rate and save timestamps for validation
-            ts = cam_instance._rec_timestamps
-            if len(ts) >= 2:
-                n = len(ts)
-                span = ts[-1] - ts[0]
-                actual_fps = (n - 1) / span if span > 0 else 0
-                print(f"{cam_instance.name}: recorded {n} frames over {span:.3f}s "
-                      f"= {actual_fps:.1f} fps actual")
+            # Stop the extra per-frame hardware-info capture on IDS.
+            if cam_instance.cam_type == 'ids_ueye' and cam_instance.camera:
                 try:
-                    rec_file = getattr(cam_instance, '_rec_filename', '')
-                    ts_path = os.path.splitext(rec_file)[0] + '_timestamps.npy' if rec_file else ''
-                    if ts_path:
-                        np.save(ts_path, np.array(ts))
-                        print(f"Timestamps saved to {ts_path}")
-                        status_msg = f"Saved {n} frames at {actual_fps:.1f} fps (timestamps: {os.path.basename(ts_path)})"
-                    else:
-                        status_msg = f"Saved {n} frames at {actual_fps:.1f} fps"
-                except Exception as e:
-                    print(f"Error saving timestamps: {e}")
-                    status_msg = f"Saved {n} frames at {actual_fps:.1f} fps"
-                cam_instance.recording_label.setText(f"Recorded: {n} frames at {actual_fps:.1f} fps")
+                    cam_instance.camera.capture_hw_info = False
+                except Exception:
+                    pass
+            cam_instance.record_button.setText("Start Recording")
+            stop_unix = time.time()
+            status_msg = self._finalize_recording(cam_instance, stop_unix)
+            if status_msg:
                 cam_instance.status_label.setText(status_msg)
             else:
                 cam_instance.recording_label.setText("Not Recording")
                 cam_instance.status_label.setText(f"Recording stopped - {cam_instance.name}")
+
+    def _finalize_recording(self, cam_instance, stop_unix):
+        """Write recording sidecars and update UI labels. Returns a status string,
+        or None if nothing was recorded. Delegates the file I/O + stats to the
+        module-level write_recording_sidecars (which is unit-testable without Qt)."""
+        stats = write_recording_sidecars(
+            getattr(cam_instance, '_rec_filename', ''),
+            cam_instance._rec_timestamps,
+            cam_instance._rec_hw_frames,
+            cam_instance._rec_hw_timestamps,
+            cam_instance._rec_ring_in_use,
+            start_unix=cam_instance.recording_start_time,
+            stop_unix=stop_unix,
+            camera=cam_instance.name,
+            width=cam_instance.current_frame_w or cam_instance.sensor_width,
+            height=cam_instance.current_frame_h or cam_instance.sensor_height,
+            nominal_fps=cam_instance.fps)
+        if stats is None:
+            return None
+        fps_for_report = stats["hw_fps"] or stats["sw_fps"]
+        cam_instance.recording_label.setText(
+            f"Recorded: {stats['n']} frames at {fps_for_report:.1f} fps "
+            f"({stats['dropped']} drops)")
+        return (f"Saved {stats['n']} frames at {fps_for_report:.1f} fps "
+                f"(drops={stats['dropped']}, ring peak={stats['ring_peak']})")
     
     def show_error(self, title, message):
         """Display an error dialog with the given title and message"""
