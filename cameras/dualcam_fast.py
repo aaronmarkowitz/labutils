@@ -2476,8 +2476,15 @@ class ThorlabsCameraApp(QMainWindow):
                 if cam_instance.cam_type == 'ids_ueye':
                     cam_instance.camera.reset_aoi()
                 elif cam_instance.cam_type == 'thorlabs':
+                    # Reset via an EXPLICIT full-sensor ROI, not roi=None: this SDK's
+                    # roi setter unpacks its argument ("cannot unpack non-iterable
+                    # NoneType" + wedged camera on reconnect). Mirrors the working
+                    # apply_roi path.
+                    from thorlabs_tsi_sdk.tl_camera import ROI
+                    sw = cam_instance.camera.sensor_width_pixels
+                    sh = cam_instance.camera.sensor_height_pixels
                     cam_instance.camera.disarm()
-                    cam_instance.camera.roi = None  # SDK interprets None as full sensor
+                    cam_instance.camera.roi = ROI(0, 0, sw - 1, sh - 1)
                     cam_instance.camera.frames_per_trigger_zero_for_unlimited = 0
                     cam_instance.camera.image_poll_timeout_ms = 200
                     cam_instance.camera.arm(30)
@@ -2537,9 +2544,23 @@ class ThorlabsCameraApp(QMainWindow):
                     if not filename.lower().endswith('.mp4'):
                         filename = filename + '.mp4'
                     
+                    # Container fps: prefer the camera's live measured rate so the
+                    # mp4 plays back at the correct SPEED even when the achievable
+                    # rate differs from the commanded fps (e.g. IDS min-fps floor at
+                    # small ROI). The TRUE per-frame timing still lives in the
+                    # hardware-clock sidecar; this only sets casual-playback speed.
+                    container_fps = cam_instance.fps
+                    try:
+                        with cam_instance.camera_lock:
+                            measured = cam_instance.camera.get_measured_frame_rate_fps()
+                        if measured and measured > 0:
+                            container_fps = measured
+                    except Exception:
+                        pass
+
                     with cam_instance.video_lock:
                         cam_instance.video_writer = cv2.VideoWriter(
-                            filename, fourcc, cam_instance.fps, (width, height)
+                            filename, fourcc, container_fps, (width, height)
                         )
                         if cam_instance.video_writer.isOpened():
                             cam_instance.recording = True
