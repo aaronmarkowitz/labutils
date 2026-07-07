@@ -4,3 +4,4 @@ snapshots/
 moku/20*_conf_sweep.yaml
 .claude/settings.local.json
 epics/auxioc*.snap
+scripts/dipole/sense_matrix_state.json

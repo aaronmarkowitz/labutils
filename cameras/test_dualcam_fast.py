@@ -37,6 +37,17 @@ _ueye_stub = types.SimpleNamespace(
     EXPOSURE_CMD=types.SimpleNamespace(IS_EXPOSURE_CMD_SET_EXPOSURE=12),
 )
 
+
+# UEYEIMAGEINFO stub (only the fields dualcam_fast reads)
+class _UEYEIMAGEINFO(ctypes.Structure):
+    _fields_ = [
+        ('u64TimestampDevice',   ctypes.c_longlong),
+        ('u64FrameNumber',       ctypes.c_longlong),
+        ('dwImageBuffersInUse',  ctypes.c_uint),
+    ]
+
+_ueye_stub.UEYEIMAGEINFO = _UEYEIMAGEINFO
+
 # IS_RECT ctypes struct used by build_ids_rect
 class _IS_RECT(ctypes.Structure):
     _fields_ = [
@@ -85,7 +96,8 @@ for _mod in ("PyQt5", "PyQt5.QtWidgets", "PyQt5.QtCore", "PyQt5.QtGui",
 
 # Now import the pure functions from dualcam_fast
 sys.path.insert(0, '/home/controls/labutils/cameras')
-from dualcam_fast import clamp_roi, compute_pacing_delay, reshape_ids_frame, build_ids_rect
+from dualcam_fast import (clamp_roi, compute_pacing_delay, reshape_ids_frame,
+                          build_ids_rect, clamp_fps_exposure, summarize_frame_info)
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +244,185 @@ class TestBuildIdsRect(unittest.TestCase):
         self.assertEqual(rect.s32Y,      0)
         self.assertEqual(rect.s32Width,  1280)
         self.assertEqual(rect.s32Height, 1024)
+
+
+# ---------------------------------------------------------------------------
+# TestClampFpsExposure
+# ---------------------------------------------------------------------------
+
+class TestClampFpsExposure(unittest.TestCase):
+
+    def test_within_range_short_exposure_unchanged(self):
+        fps, exp, warn = clamp_fps_exposure(60, 5.0, 1.0, 200.0)
+        self.assertEqual(fps, 60)
+        self.assertEqual(exp, 5.0)
+        self.assertIsNone(warn)
+
+    def test_fps_above_max_clamped(self):
+        fps, exp, warn = clamp_fps_exposure(500, 1.0, 1.0, 200.0)
+        self.assertEqual(fps, 200.0)
+        self.assertIsNotNone(warn)
+
+    def test_fps_below_min_clamped(self):
+        fps, exp, warn = clamp_fps_exposure(0.5, 1.0, 1.0, 200.0)
+        self.assertEqual(fps, 1.0)
+        self.assertIsNotNone(warn)
+
+    def test_unsupported_range_passes_fps_through(self):
+        # fps_max <= 0 means the camera reported no usable range: don't clamp fps.
+        fps, exp, warn = clamp_fps_exposure(123, 1.0, 0.0, 0.0)
+        self.assertEqual(fps, 123)
+
+    def test_exposure_reduced_to_fit_period(self):
+        # At 100 fps the period is 10ms; a 20ms exposure must drop to ~9.8ms.
+        fps, exp, warn = clamp_fps_exposure(100, 20.0, 1.0, 200.0)
+        self.assertEqual(fps, 100)
+        self.assertAlmostEqual(exp, 9.8, places=3)
+        self.assertIsNotNone(warn)
+
+    def test_exposure_clamp_uses_clamped_fps(self):
+        # Requested 500fps clamps to 200fps (period 5ms) -> exposure <= 4.9ms.
+        fps, exp, warn = clamp_fps_exposure(500, 10.0, 1.0, 200.0)
+        self.assertEqual(fps, 200.0)
+        self.assertAlmostEqual(exp, 4.9, places=3)
+
+
+# ---------------------------------------------------------------------------
+# TestSummarizeFrameInfo
+# ---------------------------------------------------------------------------
+
+class TestSummarizeFrameInfo(unittest.TestCase):
+
+    def test_no_drops_contiguous(self):
+        fc = [10, 11, 12, 13, 14]
+        # 5 frames at 200fps -> 5ms spacing (ns)
+        ts = [0, 5_000_000, 10_000_000, 15_000_000, 20_000_000]
+        out = summarize_frame_info(fc, ts)
+        self.assertEqual(out["dropped"], 0)
+        self.assertEqual(out["n_frames"], 5)
+        self.assertAlmostEqual(out["hw_fps"], 200.0, places=3)
+
+    def test_detects_genuine_drops(self):
+        # gap 12 -> 15 means frames 13,14 were captured but never received (2 drops)
+        fc = [10, 11, 12, 15, 16]
+        ts = [0, 5e6, 10e6, 25e6, 30e6]
+        out = summarize_frame_info(fc, ts)
+        self.assertEqual(out["dropped"], 2)
+
+    def test_missing_timestamps_gives_none_fps(self):
+        fc = [1, 2, 3]
+        ts = [np.nan, np.nan, np.nan]
+        out = summarize_frame_info(fc, ts)
+        self.assertIsNone(out["hw_fps"])
+        self.assertEqual(out["dropped"], 0)
+
+    def test_sentinel_negative_timestamps_ignored(self):
+        fc = [1, 2, 3, 4]
+        ts = [-1, -1, 10_000_000, 20_000_000]  # first two unsupported
+        out = summarize_frame_info(fc, ts)
+        self.assertIsNotNone(out["hw_fps"])
+
+
+# ---------------------------------------------------------------------------
+# TestIdsFrameRateRange — verify the frame-time -> fps inversion
+# ---------------------------------------------------------------------------
+
+class TestIdsFrameRateRange(unittest.TestCase):
+
+    def _make_camera(self, t_min, t_max, ret=0):
+        from dualcam_fast import IDSCamera
+        cam = object.__new__(IDSCamera)  # bypass __init__ (no hardware)
+
+        def fake_get_frame_time_range(hCam, tmin, tmax, tintv):
+            tmin.value = t_min
+            tmax.value = t_max
+            tintv.value = 0.0
+            return ret
+
+        cam._ue = types.SimpleNamespace(
+            IS_SUCCESS=0,
+            is_GetFrameTimeRange=fake_get_frame_time_range,
+        )
+        cam._hCam = object()
+        return cam
+
+    def test_inversion(self):
+        # frame times 5ms..40ms  -> fps 25..200
+        cam = self._make_camera(0.005, 0.040)
+        fps_min, fps_max = cam.get_frame_rate_range()
+        self.assertAlmostEqual(fps_min, 25.0, places=6)
+        self.assertAlmostEqual(fps_max, 200.0, places=6)
+
+    def test_failure_returns_zero(self):
+        cam = self._make_camera(0.005, 0.040, ret=1)  # non-success
+        self.assertEqual(cam.get_frame_rate_range(), (0.0, 0.0))
+
+    def test_zero_time_returns_zero(self):
+        cam = self._make_camera(0.0, 0.040)
+        self.assertEqual(cam.get_frame_rate_range(), (0.0, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# TestWriteRecordingSidecars — sidecar writing + drop reporting (no hardware)
+# ---------------------------------------------------------------------------
+
+class TestWriteRecordingSidecars(unittest.TestCase):
+
+    def test_writes_sidecars_and_counts_drops(self):
+        import os
+        import json
+        import tempfile
+        from dualcam_fast import write_recording_sidecars
+
+        # 5 recorded frames; hw frame 12->15 is a 2-frame gap (genuine drops)
+        sw_ts = [0.0, 0.005, 0.010, 0.020, 0.025]
+        hw_frames = [10, 11, 12, 15, 16]
+        hw_ts = [0, 5e6, 10e6, 25e6, 30e6]
+        ring = [1, 2, 4, 1, 1]
+
+        with tempfile.TemporaryDirectory() as d:
+            rec_file = os.path.join(d, "clip.mp4")
+            stats = write_recording_sidecars(
+                rec_file, sw_ts, hw_frames, hw_ts, ring,
+                start_unix=1000.0, stop_unix=1000.5, camera="zCam",
+                width=640, height=480, nominal_fps=200)
+
+            self.assertIsNotNone(stats)
+            self.assertEqual(stats["dropped"], 2)
+            self.assertEqual(stats["ring_peak"], 4)
+            self.assertTrue(os.path.exists(os.path.join(d, "clip_timestamps.npy")))
+            self.assertTrue(os.path.exists(os.path.join(d, "clip_hwclock.npz")))
+            self.assertTrue(os.path.exists(os.path.join(d, "clip.json")))
+
+            with open(os.path.join(d, "clip.json")) as fh:
+                meta = json.load(fh)
+            self.assertEqual(meta["dropped_frames"], 2)
+            self.assertEqual(meta["ring_peak_in_use"], 4)
+            self.assertEqual(meta["schema"], "mastqg.video_sidecar.v2")
+            # hw_measured_fps from 0..30e6 ns over 4 intervals = 133.3 fps
+            self.assertAlmostEqual(meta["hw_measured_fps"], 4 / 0.030, places=2)
+
+            # hwclock.npz round-trips the arrays
+            with np.load(os.path.join(d, "clip_hwclock.npz")) as z:
+                np.testing.assert_array_equal(z["hw_frame_count"], np.array(hw_frames))
+
+    def test_no_frames_returns_none(self):
+        from dualcam_fast import write_recording_sidecars
+        result = write_recording_sidecars(
+            "", [0.0], [1], [0.0], [0],
+            start_unix=0.0, stop_unix=1.0, camera="x",
+            width=1, height=1, nominal_fps=30)
+        self.assertIsNone(result)
+
+    def test_empty_rec_file_still_returns_stats(self):
+        # No path -> no files written, but stats still computed (auto-stop safety).
+        from dualcam_fast import write_recording_sidecars
+        stats = write_recording_sidecars(
+            "", [0.0, 0.01, 0.02], [1, 2, 3], [np.nan]*3, [1, 1, 1],
+            start_unix=0.0, stop_unix=0.02, camera="x",
+            width=1, height=1, nominal_fps=30)
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats["dropped"], 0)
 
 
 # ---------------------------------------------------------------------------

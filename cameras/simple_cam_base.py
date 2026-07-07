@@ -14,6 +14,11 @@ from PyQt5.QtGui import QPixmap, QImage
 import numpy as np
 import cv2
 
+try:
+    from video_metadata import write_sidecar
+except ImportError:  # when imported as a package
+    from cameras.video_metadata import write_sidecar
+
 
 class SimpleCameraViewer(QMainWindow):
     """Base class for single-camera viewers with process isolation."""
@@ -282,6 +287,8 @@ class SimpleCameraViewer(QMainWindow):
             self.recording = True
             self.recorded_frame_count = 0
             self.recording_start_time = time.time()
+            self._recording_filename = filename       # for the metadata sidecar at stop
+            self._recording_dims = (w, h)
             self.record_btn.setText("⬛ Stop")
             self.status_label.setText("Status: Recording...")
             print(f"Recording to {filename}")
@@ -293,10 +300,22 @@ class SimpleCameraViewer(QMainWindow):
                     self.video_writer.release()
                     self.video_writer = None
 
-            duration = time.time() - self.recording_start_time
+            stop_time = time.time()
+            duration = stop_time - self.recording_start_time
             self.record_btn.setText("⚫ Record")
             self.status_label.setText(f"Status: Saved {self.recorded_frame_count} frames ({duration:.1f}s)")
             print(f"Recording stopped: {self.recorded_frame_count} frames in {duration:.1f}s")
+
+            # Best-effort: write the true measured rate to a JSON sidecar so analysis
+            # can recover the framerate (the mp4 container fps is a fixed nominal).
+            # write_sidecar never raises, so this cannot affect recording/streaming.
+            _dims = getattr(self, "_recording_dims", (None, None))
+            write_sidecar(
+                getattr(self, "_recording_filename", None),
+                self.recorded_frame_count, self.recording_start_time, stop_time,
+                camera=getattr(self, "camera_type", None),
+                width=_dims[0], height=_dims[1], nominal_fps=20.0,
+            )
 
     def closeEvent(self, event):
         """Clean up on window close."""

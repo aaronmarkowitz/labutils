@@ -19,7 +19,7 @@ dofs:
     fit_strategy: dof_filtered
   y:
     channel: "Y1:DMD-PARTICLE_Y_IN1"
-    f0: 54.0
+    f0: 55.0
     Q: 30.0
     n_tones: 10
     tone_spacing_hz: 1.5
@@ -34,17 +34,17 @@ frequency_plan:
   fft_bin_snap: true
 
 amplitude:
-  max_amplitude_counts: 120
-  initial_amplitude_counts: 10
+  max_amplitude_counts: 50
+  initial_amplitude_counts: 1
   amp_step_factor: 3.0
 
 schroeder:
   enabled: true
 
 trim:
-  target_coherence: 0.65
+  target_coherence: 0.4
   max_trim_iters: 5
-  segment_s_max: 16
+  segment_s_max: 8
 
 diag:
   template_xml: "/home/controls/Dropbox/Microspheres/MAST-QG/worker1/data/260611/actuators_sineResponse_template.xml"
@@ -61,7 +61,7 @@ analysis:
   nds2_port: 8088
   segment_s: 16
   n_averages: 30
-  premeasure_n_averages: 3
+  premeasure_n_averages: 6
   warmup_s: 3.0
   save_raw_capture: true
 

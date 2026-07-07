@@ -2,8 +2,8 @@
 # Run with: /var/lib/cds-conda/base/envs/cds-testing/bin/python3 particle_lo_scan.py particle_lo_scan_params.yaml
 
 # Scan grid (log-spaced)
-cosgain_min: 4000
-cosgain_max: 32000
+cosgain_min: 2812
+cosgain_max: 20000
 cosgain_steps: 16   # increase for full runs (e.g. 8-10)
 
 freq_min: 3000
@@ -25,6 +25,12 @@ channels:
   - Y1:DMD-PARTICLE_X_IN1         # 65536 Hz
   - Y1:DMD-PBSZ_IN1               # 65536 Hz
   - Y1:DMD-LESZ_SUM_IN1          # 65536 Hz
+  - Y1:DMD-PARTICLE_Z_IN1         # 65536 Hz
+  - Y1:DMD-LESZ_PIT_IN1           # 65536 Hz
+  - Y1:DMD-LESZ_YAW_IN1
+  - Y1:DMD-LESX_PIT_IN1
+  - Y1:DMD-LESX_YAW_IN1
+  - Y1:DMD-LESX_SUM_IN1
   - Y1:DMD-PARTICLE_CHARGE_OUT16  # 16 Hz
   - Y1:DMD-PARTICLE_PHI_OUT16     # 16 Hz
 
