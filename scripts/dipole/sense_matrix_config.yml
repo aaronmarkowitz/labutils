@@ -38,8 +38,8 @@ rows:
   - {index: 1, label: "XERR",  mode: "x"}   # -> PARTICLE_X
   - {index: 2, label: "YERR",  mode: "y"}   # -> PARTICLE_Y
   - {index: 3, label: "ZERR",  mode: "z"}   # -> PARTICLE_Z
-  # row 4 (SIG / charge lock-in input) and row 5 (spins / PLL) are not
-  # populated by sensor diagonalization — those rows are left untouched.
+  - {index: 4, label: "charge in", mode: "y"}   # SIG / charge lock-in input, pointed along +y
+  # row 5 (spins / PLL) is not populated by sensor diagonalization — left untouched.
   #
   # DIRECTIONAL EXAMPLES (uncomment / adapt; reuse a spare row index):
   #   - {index: 4, label: "DIAG45",  angle_deg: 45}            # 45 deg in x-y

@@ -33,6 +33,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
@@ -344,6 +345,29 @@ def enable_input_module(base: str, state: dict, tramp: float, dry_run: bool) -> 
     return ok
 
 
+def write_state_file(hdf5_path: Path, hdf5: dict, entries: list[dict], tramp: float) -> Path:
+    """Record what's currently live on the SENSE matrix (gitignored, script-owned).
+
+    Written only after a fully successful (non-dry-run) upload, so the file always
+    reflects EPICS reality rather than an attempted-but-partially-failed write.
+    """
+    state_path = Path(__file__).parent / "sense_matrix_state.json"
+    rows_written = sorted({e["row_label"] for e in entries})
+    state = {
+        "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "hdf5_path": str(hdf5_path.resolve()),
+        "dofs": hdf5["dofs"],
+        "rows_written": rows_written,
+        "tramp_s": tramp,
+        "peak_hz": hdf5["peak_hz"],
+        "eigenratio": hdf5["eigenratio"],
+    }
+    with open(state_path, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+    return state_path
+
+
 def print_sparsity_warning(hdf5: dict, config: dict, entries: list[dict],
                            skipped_rows: list[dict]) -> None:
     channel_names = hdf5["channel_names"]
@@ -540,6 +564,9 @@ def main() -> None:
     print(f"\n  Done: {n_ok} written, {n_fail} failed.")
     if n_fail:
         sys.exit(1)
+
+    state_path = write_state_file(hdf5_path, hdf5, entries, args.tramp)
+    print(f"  State recorded: {state_path}")
 
 
 if __name__ == "__main__":
