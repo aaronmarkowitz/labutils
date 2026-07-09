@@ -1,10 +1,41 @@
+<!-- lab-context cross-link -->
+> **Context layer:** `~/Moore/lab-context/` (`experiment-overview.md`, `projects.yml`, `conventions.md`) — synced, no-Obsidian.
+> **Obsidian note:** [[Lab-Automation-Architecture]] *(laptop only)* · **Registry:** `lab-context/projects.yml` → `labutils`
+> **Branch-first:** feature branch → verbose commits → merge to main only when working & approved; never push without asking.
+
 # labutils
 
 Utilities and scripts for the MAST-QG magnetically levitated microdiamond experiment.
 
+## worker1 vs cymac1 (read first)
+
+**Claude runs on `worker1`** — the always-on lab workstation where this repo lives. **`cymac1`** is
+the rtcds/front-end server (FEC-11); Claude touches it **only** via `diag`/`caget`/`caput` and **only
+when explicitly instructed** (a real `Y1:DMD` measurement inherently runs against cymac1 — a data-path
+fact, not a Claude-deployment fact). The CDS paths below (`/var/lib/cds-conda`, `/opt/rtcds`,
+`/home/controls`) are the shared front-end environment reachable from worker1.
+
+## Instrument inventory
+
+Consolidated from the scripts table below:
+
+- **Cameras:** Thorlabs CS165MU + IDS DCC1545M (dual-camera GUI, `run_thorcam.py` / `cameras/dualcam_fast.py`).
+- **Moku:** waveform/pulse generator (`moku/sweep.py`, `moku/pulse.py`).
+- **Vacuum:** Leybold turbo pump (`run_leybold_turbolab.py`); future ion pump.
+- **Laser:** Teem Photonics (`teemController/`, conda env `controls`).
+- **DAQ:** NDS2 server `192.168.1.11:8088` (`fetch_nds2_data.py`).
+- **EPICS:** `y1dmd` model (`Y1:DMD`) + `auxioc` soft IOC (`Y1:AUX`).
+
+## Safety — `--dry-run` and hardware
+
+- Servo/hardware scripts support **`--dry-run`; prefer it** when testing.
+- **Never command hardware unsupervised** without the viability preconditions (particle trapped / UHV /
+  laser locked / in-range) — those become the Phase-4 viability monitor (forward pointer).
+- Aaron is the orchestrator for hardware work for now; Claude runs workers.
+
 ## Environment
 
-- **Platform**: Linux Debian 11 (amd64), workstation `cymac1`
+- **Platform**: Linux Debian 11 (amd64) — worker1 (see the worker1/cymac1 note above)
 - **EPICS tools**: `caget`, `caput`, `medm` in PATH (via cds-conda)
 - **Python**: System python3 at `/var/lib/cds-conda/base/bin/python3` (no `epics` module; use `subprocess` + `caget`/`caput`)
 - **Conda env `thorcam`**: For camera GUI (`run_thorcam.py`)
@@ -113,9 +144,16 @@ For driving sine/transfer-function measurements on the front end (e.g.
 - A real Y1:DMD `diag` measurement inherently runs against **cymac1** (FEC-11), the
   exception to the usual "default to worker1" rule.
 
+## Autonomic layer (future)
+
+This repo is the future home of the Phase-4 **skill layer** — typed hardware verbs
+(`engage_intensity_servo`, `discharge`, `measure_charge_step`, `acquire_dipole_drive_asd`,
+`upload_sense_matrix`) with pre/postconditions and a viability monitor. See the
+[[Lab-Automation-Architecture]] vault note.
+
 ## Conventions
 
-- Servo scripts support `--dry-run` for safe testing
+- Servo scripts support `--dry-run` for safe testing (see the Safety section above)
 - MEDM shell command buttons launch scripts in xterm windows
 - Moku sweep logs are saved to `~/Dropbox/Microspheres/MAST-QG/worker1/data/YYMMDD/`
 - Large log files (*.log) are gitignored
