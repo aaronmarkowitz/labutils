@@ -11,6 +11,9 @@ Order matters. Details: `PROCEDURE.md`.
    Post-W-upload only.
 5. Driven tones, x and y: one off-res tone each (above-res not needed) + both cams
    + videoSimul XML. On-res optional for SNR.
+   - Every clip needs a correct `zCam`/`xCam` token: it is the ONLY cam→DOF source and
+     a missing one silently defaults to `zcam`. z-cam = `Camera 1`/400×100/`0p1msExp`;
+     x-cam = `Camera 2`/500×150/`11p1msExp`. Keep `f_drive < 0.45·measured_fps`.
 6. Equip re-check (noExc CSD + verify).
 
 ## HV (~1e-5 mbar)
@@ -26,5 +29,7 @@ Order matters. Details: `PROCEDURE.md`.
 
 ## Standing cals (check, don't retake)
 
-- `zpixel_um` auto-staleness-checked; `xpixel_um` STILL UNMEASURED (do once, any pressure).
+- `zpixel_um` 0.5728 ±0.8%; `xpixel_um` 0.5203 ±1.3% (fit-stat, ~5% cross-clip) — BOTH
+  MEASURED 2026-08-03 (step 03e), in `analysis/mastqg/dipole_pipeline/pixel_calibration_state.yml`.
+  Check staleness, don't retake.
 - ACTS matrix + field cal: reuse unless trap location moved.
