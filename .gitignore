@@ -1,5 +1,6 @@
 __pycache__/
 *.log
+*.log.*.gz
 snapshots/
 moku/20*_conf_sweep.yaml
 .claude/settings.local.json
