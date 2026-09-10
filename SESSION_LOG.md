@@ -42,3 +42,9 @@ Sessions append to the bottom. Do not edit prior entries except to mark open que
 
 **Notes**:
 - Part of the Claude Code architecture overhaul, Phase 1. Registry entry: `labutils` in `lab-context/projects.yml`; human note `[[Lab-Automation-Architecture]]` (laptop only).
+
+---
+
+**RETIRED 2026-09-10.** This log is superseded by `HANDOFF.md` at the repo root — see its
+§0 for current state. Do not append further entries here; the entries above are kept for
+history only.
