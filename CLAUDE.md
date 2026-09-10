@@ -39,7 +39,7 @@ Interpreters and envs on **worker1**:
 |---|---|---|
 | `/var/lib/cds-conda/base/bin/python3` | no `epics` module | EPICS work via `subprocess` + `caget`/`caput` |
 | `/var/lib/cds-conda/base/envs/cds-testing/bin/python3` | `nds2`, `dttxml`, `numpy`, `scipy`, `h5py`, `yaml`, `pytest` | **the pytest interpreter**; diag/NDS2 analysis |
-| conda env `mastqg` | `dttxml`, but **no** `nds2`, **no** `pytest` | general analysis |
+| conda env `mastqg` | `dttxml`, `pytest`, but **no** `nds2` | general analysis; cannot run this repo's tests (they import `nds2`) |
 | conda env `thorcam` | Thorlabs + IDS SDKs | camera GUI (`cameras/run_thorcam.py`) |
 | conda env `controls` | — | teem laser service |
 
