@@ -1,7 +1,13 @@
-amp: 4.8
-amplitude increment: 1.005
+amp: .1
+amplitude increment: 1.02
 base frequency: 3e3
 channel: 1
+# DC offset added to the swept sine, in volts. Held fixed for the whole
+# amplitude ramp. Output is offset +- amp/2 (amp is peak-to-peak), and the
+# Moku:Go range is +-5 V peak, so a nonzero offset costs headroom at the top of
+# the ramp -- sweep.py reports the first pulse that would exceed the rail before
+# asking for confirmation. Omit or set to 0 for a sine centred on 0 V.
+dc offset: 0
 end amp: 10
 ip_address: "192.168.1.3"
 no_pulses: 1000
