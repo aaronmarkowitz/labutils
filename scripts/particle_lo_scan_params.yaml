@@ -2,18 +2,18 @@
 # Run with: /var/lib/cds-conda/base/envs/cds-testing/bin/python3 particle_lo_scan.py particle_lo_scan_params.yaml
 
 # Scan grid (log-spaced)
-cosgain_min: 2812
+cosgain_min: 10000
 cosgain_max: 20000
-cosgain_steps: 16   # increase for full runs (e.g. 8-10)
+cosgain_steps: 8   # increase for full runs (e.g. 8-10)
 
-freq_min: 3000
-freq_max: 9000
-freq_steps: 4      # increase for full runs (e.g. 8-10)
+freq_min: 5000
+freq_max: 5000
+freq_steps: 1      # increase for full runs (e.g. 8-10)
 
 # Timing
 wait_time_freq: 60.0      # seconds to wait after a frequency change; TRAMP = wait_time_freq/2
 wait_time_cosgain: 30.0   # seconds to wait when only COSGAIN changes; TRAMP = wait_time_cosgain/2
-record_duration: 256.0    # seconds of NDS2 data to record per grid point
+record_duration: 120.0    # seconds of NDS2 data to record per grid point
 
 # NDS2 connection
 nds2_server: "192.168.1.11"
@@ -35,7 +35,7 @@ channels:
   - Y1:DMD-PARTICLE_PHI_OUT16     # 16 Hz
 
 # Label appended to auto-generated run directory name
-run_label: "cosfreq_scan"
+run_label: "d260804a_1e-5mbar_xGm3_zGm02_noDischarge_cosfreq_scan1"
 
 # Root data directory (date/timestamp subdirectories created automatically)
 output_root: "~/Dropbox/Microspheres/MAST-QG/worker1/data"
