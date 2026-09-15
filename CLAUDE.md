@@ -95,7 +95,7 @@ All paths verified 2026-09-10.
 | `scripts/dipole/measure_actuator_gain.py` | Measure electrode→particle actuator gains via a `diag` SineResponse (see `scripts/dipole/README.md`) |
 | `scripts/dipole/dipole_sideband_model.py` | Turns the naive rotating-field E-field ellipse into the dipole **libration sideband** (ωφ=√(d·\|E₊\|/I), co-rotating projection — NOT ⟨\|E\|⟩) and the headline d-inference error `d_inferred/d_true = \|E₊\|_true/E_believed` |
 | `scripts/dipole/plot_actuator_gain.py`, `plot_naive_vs_measured_acts.py` | Plotting for the above |
-| `moku/sweep.py`, `moku/pulse.py` | Moku waveform-generator sweep / pulse control |
+| `moku/sweep.py`, `moku/pulse.py` | Moku waveform-generator sweep / pulse control. `conf_sweep.yaml`'s `dc offset` (volts, fixed across the ramp) reaches `generate_waveform(offset=)`; amplitude is **peak-to-peak**, so the excursion is `\|offset\| + amp/2` against a ±5 V Moku:Go rail — `moku/sweep_limits.py` (`--self-test`, no hardware, no env) names the first pulse that would exceed it before the run is confirmed. |
 | `teemController/` | Teem Photonics laser controller daemon + EPICS integration |
 
 **Equipartition / common-unit anchor semantics** (what `common_unit_anchor`,
