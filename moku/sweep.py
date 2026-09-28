@@ -1,17 +1,15 @@
-import numpy as np
-import math
-import time
 import sys
 import yaml
 from moku.instruments import WaveformGenerator
-from datetime import datetime
 
+import sweep_core
 import sweep_limits
 
+# The conf parsing, ramp planning and drive loop live in sweep_core.py so the
+# particle loader (dropper_server.py) can reuse them; this file is the
+# interactive CLI and behaves as it always has.
 
-def format_ip(addr):
-    # IPv6 addresses need brackets in URLs; IPv4 addresses must not have them
-    return '[' + addr + ']' if ':' in addr else addr
+format_ip = sweep_core.format_ip
 
 #Load IP address from config file, or ask user to input it
 ip = None
@@ -38,21 +36,6 @@ while ip_flag:
         ip = None
 
 
-
-#Set default parameters
-channel_no = 1 #Default channel number
-amp = 1 #Starting amplitude of waveform
-end_amp = 2 #Ending amplitude of waveform 
-start_freq = 1 #Starting frequency
-stop_freq = 100 #Ending frequency
-T = 3 #duration of sweep
-amp_incr = 1.01 #Multiplicative amplitude increment
-no_pulses = 10 #Number of pulses (note: redundant as amp_incr and the other variables determine
-                #the number of pulses)
-dc_offset = 0 #DC offset added to the sine, in volts; held fixed for the whole ramp
-
-
-
 #Read conf_sweep.yaml file for parameters, output signal duration and number of pulses,
 # and ask use for confirmation before producing signal
 check_sig = True
@@ -60,137 +43,78 @@ while check_sig:
     try:
 
         #Read configuration from yaml file
-        try: 
-            with open('conf_sweep.yaml', 'r') as file:
-                loaded_conf = yaml.safe_load(file)
-
+        try:
+            loaded_conf = sweep_core.load_conf('conf_sweep.yaml')
             print("\nData read from 'conf_sweep.yaml':")
             [print(f"{key}: {value}") for key, value in loaded_conf.items()]
-            amp = loaded_conf['amp']
-            end_amp = loaded_conf['end amp']
-            start_freq = float(loaded_conf['base frequency'])
-            stop_freq = float(loaded_conf['stop frequency'])
-            T = loaded_conf['sweep duration']
-            amp_incr = loaded_conf['amplitude increment']
-            if amp_incr == 'None':
-                amp_incr = None
-            no_pulses = loaded_conf['no_pulses']
-            channel_no = int(loaded_conf.get('channel', channel_no))
-            #Optional, so conf files written before this key existed still load
-            dc_offset = float(loaded_conf.get('dc offset', dc_offset) or 0)
-
         except Exception as e:
             print(f"An error occurred in trying to load conf_sweep.yaml: {e}")
             print('Using default parameters.')
-        
-        #Calculate time of signal and no_pulses if amp_incr is given
-        if amp_incr != None:
-            max_pulses = np.log(end_amp/amp)/np.log(amp_incr)
-            no_pulses = int(math.ceil(max_pulses)) + 1
-            print('Calculated number of pulses is:', no_pulses)
-            max_time = T*no_pulses
+            loaded_conf = {}
 
-        #If amp_incr is not given, calculate time of signal and amp_incr using no_pulses
+        #Calculate time of signal and no_pulses (or amp_incr) -- see sweep_core.plan_ramp
+        plan = sweep_core.plan_ramp(loaded_conf)
+        if loaded_conf.get('amplitude increment', 1.01) not in (None, 'None'):
+            print('Calculated number of pulses is:', plan['no_pulses'])
         else:
-            max_time = no_pulses*T
-            amp_incr = (end_amp/amp)**(1/(no_pulses-1))
-            print('Calculated multiplicative amplitude increment is:', round(amp_incr,3))
+            print('Calculated multiplicative amplitude increment is:',
+                  round(plan['amplitude increment'], 3))
 
         #Check the whole planned ramp against the Moku:Go +-5 V output range before
         #any output. A DC offset that fits on pulse 1 can exceed the rail hundreds
         #of pulses later, unattended, so warn here rather than discovering it mid-run.
         #Warning only: proceeding deliberately is still allowed.
-        planned_amps = sweep_limits.pulse_amplitudes(
-            amp, amp_incr, sweep_limits.n_pulses_emitted(T, max_time))
-        headroom = sweep_limits.check_headroom(planned_amps, dc_offset)
+        headroom = plan['headroom']
         print('\nDC offset: {:+g} V. Peak output excursion over the ramp: {:.3f} V '
-              '(limit +-{:g} V).'.format(dc_offset, headroom['peak_v'],
+              '(limit +-{:g} V).'.format(plan['dc offset'], headroom['peak_v'],
                                          sweep_limits.PEAK_LIMIT_V))
         for msg in headroom['messages']:
             print('WARNING: ' + msg)
 
         #Output signal duration and number of pulses and ask for user confirmation
-        foo = input('\nTotal signal duration is ' + str(max_time) + 's, with ' + str(no_pulses) +
+        foo = input('\nTotal signal duration is ' + str(plan['max_time']) + 's, with ' +
+                    str(plan['no_pulses']) +
                     ' pulses. Enter y to proceed or upload new conf_sweep.yaml file\n')
         if foo == 'y':
             check_sig = False
-    
+
     except Exception as e:
             print(f"An error occurred: {e}")
-        
 
-#Store configuration to conf dict
-conf = {
-    'amp': amp,
-    'channel': channel_no,
-    'end amp': end_amp,
-    'ip_address': ip.strip('[]'),
-    'base frequency': start_freq,
-    'stop frequency': stop_freq,
-    'sweep duration' : T,
-    'amplitude increment': amp_incr,
-    'no_pulses': no_pulses,
-    'dc offset': dc_offset,
-}
-
+plan['ip_address'] = ip.strip('[]')
 
 #Put date, time etc. in conf file name and save to Dropbox data directory
-import os
-data_dir = os.path.expanduser(
-    f"~/Dropbox/Microspheres/MAST-QG/worker1/data/{datetime.now().strftime('%y%m%d')}"
-)
-os.makedirs(data_dir, exist_ok=True)
-file_name = datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss") + "_conf_sweep.yaml"
-file_path = os.path.join(data_dir, file_name)
-
-#Save conf as yaml file
-with open(file_path,'w') as file:
-    yaml.dump(conf, file)
+file_path = sweep_core.save_conf_copy(plan)
 print('Configuration has been saved to ' + file_path + '\n')
 
 
+def on_pulse(k, c_amp, time_elapsed):
+    if time_elapsed == 0:
+        print('Printing summary of initial state: \n')
+        print(i.summary())
+    T = plan['sweep duration']
+    pulse_index = int(round((plan['no_pulses']*(time_elapsed + T))/plan['max_time']))
+    print('Running... Press Ctrl + C to stop. Pulse amplitude:', round(c_amp,3),
+          ' V. DC offset:', round(plan['dc offset'],3), ' V. Pulse ',pulse_index,' of ',
+          plan['no_pulses'])
+
 
 try:
-    # Load and configure the waveform.
-    #i.generate_waveform(channel=1, type='Sine', amplitude=amp, frequency=start_freq)
-
-    #Don't think you can do modulation and sweep mode at the same time, so I don't think you can do amplitude modulation 
-    #i.set_modulation(channel=1, type='Amplitude', source='Internal', depth=10, frequency=10)
-
-    #i.set_sweep_mode(channel=1, source='Internal', stop_frequency=stop_freq, sweep_time=T, trigger_level=0)
-
-    time_elapsed = 0
-    c_amp = amp
-    
-    # Enable output channel 1 is not required, it is enabled by the generate_waveform call.
-    #i.enable_outputs(channel=1, enable=True)
-    
-    while time_elapsed <= max_time:
-
-        i.generate_waveform(channel=channel_no, type='Sine', amplitude=c_amp,
-                            frequency=start_freq, offset=dc_offset)
-        i.set_sweep_mode(channel=channel_no, source='Internal', stop_frequency=stop_freq, sweep_time=T, trigger_level=0)
-
-        if time_elapsed == 0:
-            print('Printing summary of initial state: \n')
-            print(i.summary())
-
-        pulse_index = int(round((no_pulses*(time_elapsed + T))/max_time))
-        print('Running... Press Ctrl + C to stop. Pulse amplitude:', round(c_amp,3),
-              ' V. DC offset:', round(dc_offset,3), ' V. Pulse ',pulse_index,' of ', no_pulses)
-        time.sleep(T)
-        time_elapsed += T
-        c_amp = c_amp*amp_incr
-    
+    sweep_core.run_sweep(i, plan, on_pulse=on_pulse)
     print('\nSignal generation complete. Terminating program.')
-    
+
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
 except KeyboardInterrupt:
     print("Program to be terminated at user's request.\n")
 
 finally:
-    #A little laggy here, pulse continues for a little longer than desired before shutting off. 
+    #set_defaults() alone is laggy (the pulse continues for a while), so switch
+    #the waveform Off first, then restore defaults.
+    try:
+        sweep_core.output_off(i, plan['channel'])
+    except Exception as e:
+        print(f"Could not switch output off directly: {e}")
     i.set_defaults()
 
     print('Printing endstate summary: \n')
@@ -198,4 +122,3 @@ finally:
 
     i.relinquish_ownership()
     sys.exit("Program terminated.")
-

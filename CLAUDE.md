@@ -97,6 +97,7 @@ All paths verified 2026-09-10.
 | `scripts/dipole/plot_actuator_gain.py`, `plot_naive_vs_measured_acts.py` | Plotting for the above |
 | `moku/sweep.py`, `moku/pulse.py` | Moku waveform-generator sweep / pulse control. `conf_sweep.yaml`'s `dc offset` (volts, fixed across the ramp) reaches `generate_waveform(offset=)`; amplitude is **peak-to-peak**, so the excursion is `\|offset\| + amp/2` against a ±5 V Moku:Go rail — `moku/sweep_limits.py` (`--self-test`, no hardware, no env) names the first pulse that would exceed it before the run is confirmed. |
 | `teemController/` | Teem Photonics laser controller daemon + EPICS integration |
+| `loader/load_particle.py` | Automated particle loading (thorcam env): chirp the dropper, detect on the x cam, photometry → Mie size estimate vs ledger references (`particle_ledger.jsonl` in the Dropbox data root), reject/accept. Dropper runs as `moku/dropper_server.py` in the `moku` env (deadman on pipe close). Eject is plan-only (`loader/eject.py`). Headless raw-count camera access: `cameras/camera_io.py`. |
 
 **Equipartition / common-unit anchor semantics** (what `common_unit_anchor`,
 `relT`, and the deprecated `--disagreement` mean, and why `equipartition` and not
