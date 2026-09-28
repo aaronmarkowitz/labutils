@@ -203,7 +203,9 @@ def difference_photometry(stack, baseline, exposure_s, saturation_level, center=
     Extra keys: 'significance' (net / noise of the mean difference frame),
     'noise_floor_mean_counts', 'annulus_residual_counts' (the annulus level
     relative to the baseline's, times the aperture area) and 'baseline_stale'
-    (that residual > 5 x the noise: the pattern moved, distrust the result).
+    (that residual > 5 x the noise). baseline_stale is a DRIFT INDICATOR, not a
+    validity flag: a uniform level drift (0.09 count/px seen over a minute) trips
+    it, yet the annulus removes exactly that. Don't gate decisions on it.
     Saturation is judged on the raw frames."""
     stack = np.asarray(stack, dtype=float)
     base = np.asarray(baseline, dtype=float)

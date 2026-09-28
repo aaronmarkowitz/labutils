@@ -38,6 +38,10 @@ on the x cam) varies. The trap particle sits at ROI (788, 145), i.e. full frame 
 - G4 loop on new data (fake Moku, r_ap 50, spread 0.1): reference-like particle → reject →
   simulated eject → 1 % particle detected, stopped at 0.50 s, sized by difference photometry
   (38.7σ, measured ratio 0.0099) → ACCEPT [212, 307] nm → alert.
+- G5 live, all defaults, fake Moku: occupied (brightest-spot and fixed checks) → no chirp →
+  B 2.49e5 (1.03 × ref) → ambiguous under spread 0 → stop. `size_model.py --self-test` PASSED.
+- A "no-particle" result (detector confirmed, photometry < 5σ) now STOPS and alerts instead of
+  re-chirping: it is most likely a real 0.003–0.005 particle.
 - Tests: pytest 175 passed / 4 skipped; `-m control` 18 passed.
 
 ### Fixed this pass

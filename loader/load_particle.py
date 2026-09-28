@@ -393,8 +393,10 @@ def cmd_run(args):
             verdict, why = decide(entry, args)
             ledger.set_field(entry['id'], 'decision', verdict, args.ledger)
             log('decision', verdict=verdict, why=why, id=entry['id'])
-            if verdict == 'no-particle':
-                continue                # nothing measurable after all: chirp again
+            # 'no-particle' (detector confirmed, photometry < k sigma) falls through to
+            # the stop below: it is most likely a real particle at the 0.003-0.005
+            # edge -- the best catch the loader can make -- and occupancy (~0.05)
+            # could not see it before another chirp dropped a second one on it.
             if verdict == 'accept':
                 result = f"ACCEPTED particle {entry['id']}: {why}. Loader stopped."
                 break
