@@ -194,6 +194,53 @@ def measure_stack(stack, exposure_s, saturation_level, center=None, r_ap=DEFAULT
     }
 
 
+def difference_photometry(stack, baseline, exposure_s, saturation_level, center=None,
+                          r_ap=DEFAULT_R_AP, search_r=80, **kw):
+    """measure_stack on (frames - empty-trap baseline mean + its median level).
+
+    The fixed-pattern background that limits annulus photometry cancels; the
+    annulus step stays and absorbs a uniform level drift since the baseline.
+    Extra keys: 'significance' (net / noise of the mean difference frame),
+    'noise_floor_mean_counts', 'annulus_residual_counts' (the annulus level
+    relative to the baseline's, times the aperture area) and 'baseline_stale'
+    (that residual > 5 x the noise: the pattern moved, distrust the result).
+    Saturation is judged on the raw frames."""
+    stack = np.asarray(stack, dtype=float)
+    base = np.asarray(baseline, dtype=float)
+    if base.shape[1:] != stack.shape[1:]:
+        raise ValueError(f"baseline frame shape {base.shape[1:]} != {stack.shape[1:]}")
+    bm = base.mean(0)
+    level = float(np.median(bm))
+    diff = stack - bm + level
+    if center is not None and search_r:
+        # The detector reports the ring PSF's bright side, up to ~50 px from the
+        # flux centre; re-centre on the aperture-scale flux maximum nearby.
+        yy, xx = np.indices(bm.shape)
+        near = np.hypot(xx - center[0], yy - center[1]) <= search_r
+        cx, cy, _ = find_peak(diff.mean(0), smooth_r=max(1, int(r_ap) // 2), exclude=~near)
+        center = (cx, cy)
+    m = measure_stack(diff, exposure_s, saturation_level, center=center, r_ap=r_ap, **kw)
+    cx, cy = m['center_xy']
+    crop, ox, oy = _crop(stack.mean(0), cx, cy, m['r_ap'])
+    rr = _radius_grid(crop.shape, cx - ox, cy - oy)
+    raw = stack[:, oy:oy + crop.shape[0], ox:ox + crop.shape[1]][:, rr <= m['r_ap']]
+    m['peak_raw'] = float(raw.max())
+    m['saturated'] = bool(m['peak_raw'] >= saturation_level)
+    n, nb = len(stack), len(base)
+    floor = m['noise_floor_counts'] * math.sqrt(1.0 / n + 1.0 / nb)
+    if math.isfinite(m['noise_floor_spatial_counts']):
+        floor = max(floor, m['noise_floor_spatial_counts'])
+    resid = (m['bkg_per_px'] - level) * m['n_ap_px']
+    m.update({'method': 'difference', 'baseline_level': level, 'n_baseline': nb,
+              'noise_floor_mean_counts': floor,
+              # no source-free positions -> no floor -> NaN, never a pass
+              'significance': (m['net_counts'] / floor if math.isfinite(floor) and floor > 0
+                               else float('nan')),
+              'annulus_residual_counts': float(resid),
+              'baseline_stale': bool(abs(resid) > 5 * floor)})
+    return m
+
+
 def exposure_ladder(grab, start_us, min_us=100, max_us=500000, n=10,
                     target_frac=0.6, max_steps=8, **measure_kw):
     """Find the longest unsaturated exposure and measure there.

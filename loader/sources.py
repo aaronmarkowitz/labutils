@@ -10,6 +10,8 @@ import time
 
 import numpy as np
 
+import synth
+
 
 class LiveSource:
     def __init__(self, cam, exposure_us, roi=None):
@@ -68,6 +70,7 @@ class ReplaySource:
         self.realtime = realtime
         self.serial = serial
         self._i = 0
+        self._rng = np.random.default_rng(1)
         self._k = 0                       # next particle index
         self._present = None              # scale of the particle now in the trap
         self._appear_at = None
@@ -104,7 +107,7 @@ class ReplaySource:
         self._i += 1
         if self.realtime:
             time.sleep(1.0 / self.fps)
-        return np.clip(np.round(f), 0, self.saturation_level), t
+        return synth.requantize(f, self.saturation_level, self._rng), t
 
     def frames(self):
         while True:

@@ -27,7 +27,8 @@ from photometry import box_smooth
 class TrapDetector:
     def __init__(self, baseline, region_center=None, region_radius=None, smooth_r=12,
                  k_sigma=6.0, persist_s=0.5, confirm_s=3.0, frac_above=0.7,
-                 max_net_drift_px=60.0, max_speed_px_s=200.0, gap_reset_frames=4):
+                 max_net_drift_px=60.0, max_speed_px_s=200.0, gap_reset_frames=4,
+                 destripe=True):
         base = np.asarray(baseline, dtype=float)
         if base.ndim != 3 or len(base) < 5:
             raise ValueError("baseline must be a stack of >= 5 frames")
@@ -36,8 +37,15 @@ class TrapDetector:
         self.center = region_center if region_center is not None else (w / 2.0, h / 2.0)
         self.radius = region_radius if region_radius is not None else math.hypot(w, h)
         yy, xx = np.indices(self.shape)
-        self.mask = np.hypot(xx - self.center[0], yy - self.center[1]) <= self.radius
         self.smooth_r = int(smooth_r)
+        # Search only where the smoothing box is fully inside the frame: edge
+        # pixels average fewer samples, are noisier, and otherwise set the null max.
+        b = self.smooth_r
+        self.mask = ((np.hypot(xx - self.center[0], yy - self.center[1]) <= self.radius)
+                     & (xx >= b) & (xx < w - b) & (yy >= b) & (yy < h - b))
+        if not self.mask.any():
+            raise ValueError("trap region has no pixels a full smoothing box away from the edge")
+        self.destripe = bool(destripe)
         self.mean = base.mean(0)
         n = len(base)
         total = base.sum(0)
@@ -66,7 +74,10 @@ class TrapDetector:
         self.state = 'empty'
 
     def _stat(self, frame, ref):
-        s = box_smooth(frame - ref, self.smooth_r)
+        d = frame - ref
+        if self.destripe:
+            d = d - row_offsets(d)[:, None]
+        s = box_smooth(d, self.smooth_r)
         # Remove any uniform level change (laser power drift) before the max.
         s = s - np.median(s[self.mask])
         s = np.where(self.mask, s, -np.inf)
@@ -128,7 +139,21 @@ class TrapDetector:
         return {'threshold_sigma': self.k_sigma, 'null_mean': self.null_mean,
                 'null_std': self.null_std, 'region_center': self.center,
                 'region_radius': self.radius, 'smooth_r': self.smooth_r,
+                'destripe': self.destripe,
                 'persist_s': self.persist_s, 'confirm_s': self.confirm_s}
+
+
+def row_offsets(d, n_chunks=16):
+    """Robust per-row level of a difference frame: the median over column chunks
+    of the chunk means. The IDS sensor has row-correlated read noise (row-mean
+    std ~0.08 counts vs 0.018 expected for white noise, 2026-09-28 dark frames),
+    which dominates a large smoothing box. A particle covering fewer than half
+    the chunks of a row does not bias the median."""
+    h, w = d.shape
+    n = max(1, min(n_chunks, w // 8))
+    edges = np.linspace(0, w, n + 1).astype(int)
+    chunk = np.stack([d[:, a:b].mean(1) for a, b in zip(edges[:-1], edges[1:])], axis=1)
+    return np.median(chunk, axis=1)
 
 
 def occupancy(stack, center, r_ap, saturation_level, exposure_s, k_sigma=5.0, **kw):

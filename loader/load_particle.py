@@ -48,6 +48,8 @@ DATA_ROOT = os.path.expanduser('~/Dropbox/Microspheres/MAST-QG/worker1/data')
 DEFAULT_CONF = os.path.join(REPO, 'moku', 'conf_sweep.yaml')
 X_CAM_SERIAL = '4103314187'     # IDS DCC1545M; x cam per Alma's GUI setup (confirm!)
 TRAP_XY = (765.0, 636.0)        # 10 pg reference particle on the x cam, 2026-09-28
+DIFF_BELOW_SIGMA_SP = 20.0      # use difference photometry below this annulus significance
+DEFAULT_ROI = (0, 500, 1280, 300)   # full width x 300 rows about the trap row (Alma, 2026-09-28)
 
 PVS = {
     'poz_inmon': 'Y1:DMD-LASER_POZ_INMON',
@@ -161,13 +163,40 @@ class Preview:
 
 # ----------------------------------------------------------------------------- measure
 
-def measure_particle(src, center, args, log, reference_mass_pg=None, save_dir=None):
-    """Exposure ladder + photometry + PVs + size estimate; append to the ledger."""
+def measure_particle(src, center, args, log, reference_mass_pg=None, save_dir=None, baseline=None,
+                     search_r=80.0):
+    """Exposure ladder + photometry + PVs + size estimate; append to the ledger.
+
+    Annulus photometry is limited by fixed-pattern background (sigma_spatial ~3x
+    sigma_temporal, 2026-09-28). When the pre-chirp empty-trap `baseline` is given
+    and the particle is faint (annulus net < DIFF_BELOW_SIGMA_SP * sigma_spatial),
+    B comes from difference photometry against it at the detection exposure."""
+    det_us = src.exposure_us
+    # Centre the aperture on the aperture-scale flux maximum within search_r of
+    # `center`: the detector reports the ring PSF's bright side (~50 px off),
+    # and an off-centre r_ap 50 aperture loses ~20% of the flux.
+    h, w = (baseline.shape[1:] if baseline is not None else src.grab(det_us, 1)[0].shape[1:])
+    yy, xx = np.indices((h, w))
+    near = np.hypot(xx - center[0], yy - center[1]) <= search_r
     best, rungs = photometry.exposure_ladder(
         src.grab, src.exposure_us, min_us=args.min_exposure_us, max_us=args.max_exposure_us,
-        n=args.n_measure, center=center, r_ap=args.r_ap)
+        n=args.n_measure, center=None, search_mask=near, smooth_r=max(1, args.r_ap // 2),
+        r_ap=args.r_ap)
     if best is None:
         raise RuntimeError("every exposure rung saturated -- lower --min-exposure-us")
+    method = 'annulus'
+    sp = best['noise_floor_spatial_counts']
+    sig_ann = best['net_counts'] / sp if math.isfinite(sp) and sp > 0 else float('nan')
+    significance = sig_ann
+    diff = None
+    if baseline is not None and not sig_ann >= DIFF_BELOW_SIGMA_SP:     # NaN -> try diff
+        stack, _ = src.grab(det_us, args.n_measure)
+        diff = photometry.difference_photometry(stack, baseline, det_us * 1e-6,
+                                                src.saturation_level, center=center, r_ap=args.r_ap,
+                                                search_r=search_r)
+        diff['exposure_us'] = det_us
+        if not diff['saturated']:
+            best, method, significance = diff, 'difference', diff['significance']
     pv = caget_all()
     B = ledger.brightness(best['counts_per_s'], pv.get('poz_inmon'))
     x_on = (pv['pox_inmon'] > X_LASER_ON_POX) if pv.get('pox_inmon') is not None else None
@@ -175,22 +204,25 @@ def measure_particle(src, center, args, log, reference_mass_pg=None, save_dir=No
         'kind': 'measurement', 'camera_serial': src.serial, 'x_laser_on': x_on,
         'brightness': B, 'brightness_unit': 'counts/s per 1000 POZ_INMON counts',
         'counts_per_s': best['counts_per_s'], 'exposure_us': best['exposure_us'],
+        'photometry_method': method, 'significance': significance,
+        'significance_annulus': sig_ann,
         'photometry': best, 'linearity_ratio': best.get('linearity_ratio'),
         'ladder': [{k: r[k] for k in ('exposure_us', 'counts_per_s', 'peak_raw', 'saturated')}
                    for r in rungs],
-        'pvs': pv, 'r_ap': args.r_ap,
+        'pvs': pv, 'r_ap': args.r_ap, 'roi': getattr(args, 'roi', None),
     }
     if reference_mass_pg:
         entry['epstein_mass_pg'] = float(reference_mass_pg)
         entry['kind'] = 'reference'
     rows = ledger.load(args.ledger)
-    refs = ledger.references(rows, camera_serial=src.serial, x_laser_on=x_on)
+    refs = ledger.references(rows, camera_serial=src.serial, x_laser_on=x_on, r_ap=args.r_ap)
     if reference_mass_pg:
         refs = refs + [(B, size_model.diameter_from_mass(float(reference_mass_pg) * 1e-15), 'self')]
     est = None
     if refs and B:
         est = size_model.estimate_diameter(B, [(r[0], r[1]) for r in refs], pols=tuple(args.pol_deg),
-                                           na=args.na)
+                                           na=args.na, size_spread=args.size_spread)
+        est['size_spread'] = args.size_spread
     entry['size_estimate'] = est
     entry['n_references'] = len(refs)
     # Mie-free cross-check (INFORMATIONAL, not used in the decision yet): in the
@@ -203,10 +235,13 @@ def measure_particle(src, center, args, log, reference_mass_pg=None, save_dir=No
         rms_ref = math.hypot(*rr['photometry']['centroid_std_xy_px'])
         entry['motion_mass_ratio_vs_ref'] = (rms_ref / rms) ** 2
         entry['motion_ref_id'] = rr['id']
-    # detectability: smallest ratio seen at 5 sigma in one frame at this exposure
+    # Limits relative to THIS particle: the detector's (temporal noise, one frame)
+    # and the annulus sizing photometry's (fixed-pattern noise, mean frame).
     if best['noise_floor_counts_per_s'] and B:
         r5 = 5 * best['noise_floor_counts_per_s'] / best['counts_per_s']
         entry['min_detectable_ratio_5sigma_frame'] = r5
+        entry['min_sizable_ratio_5sigma_annulus'] = (
+            5 * best['noise_floor_spatial_counts'] / best['net_counts'])
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         stack, meta = src.grab(best['exposure_us'], args.n_measure)
@@ -231,6 +266,11 @@ def measure_particle(src, center, args, log, reference_mass_pg=None, save_dir=No
 def decide(entry, args):
     """'accept' | 'reject' | 'ambiguous' | 'no-calibration', with a reason."""
     est = entry.get('size_estimate')
+    sig = entry.get('significance')
+    if sig is not None and not math.isfinite(sig):
+        return 'ambiguous', 'no noise floor (no source-free aperture fits the ROI)'
+    if sig is not None and sig < args.k_occupancy:
+        return 'no-particle', f"measured flux is only {sig:.1f} sigma (< {args.k_occupancy})"
     if not est:
         return 'no-calibration', 'no reference particle for this camera / x-laser state'
     if entry['photometry'].get('saturated'):
@@ -256,18 +296,24 @@ def baseline_stack(frames_iter, n):
 
 
 def attempt_load(src, frames_iter, args, log, preview):
-    """One chirp. Returns 'loaded' | 'occupied' | 'no-load' (ramp ended)."""
+    """One chirp. Returns (outcome, where, empty_baseline): outcome 'loaded' |
+    'occupied' | 'no-load' (ramp ended) | 'lost'; empty_baseline is the pre-chirp
+    stack when the trap was empty (for difference photometry), else None."""
     from dropper_client import DropperClient
     base, _ = baseline_stack(frames_iter, args.n_baseline)
-    occ, m = det_mod.occupancy(base, args.trap_xy, args.r_ap, src.saturation_level,
-                               src.exposure_us * 1e-6, k_sigma=args.k_occupancy)
-    log('occupancy', occupied=occ, net_counts=m['net_counts'],
-        sigma_spatial=m['noise_floor_spatial_counts'])
-    if occ:
-        return 'occupied'
+    # The particle does not always trap at the same z (x-cam horizontal): test the
+    # nominal trap AND the brightest spot in the trap region.
+    for where in (args.trap_xy, None):
+        occ, m = det_mod.occupancy(base, where, args.r_ap, src.saturation_level,
+                                   src.exposure_us * 1e-6, k_sigma=args.k_occupancy,
+                                   search_mask=region_mask(base.shape[1:], args))
+        log('occupancy', at=m['center_xy'], occupied=occ, net_counts=m['net_counts'],
+            sigma_spatial=m['noise_floor_spatial_counts'])
+        if occ:
+            return 'occupied', m['center_xy'], None
     det = det_mod.TrapDetector(base, region_center=args.trap_xy, region_radius=args.region_px,
                                k_sigma=args.k_sigma, persist_s=args.persist_s,
-                               smooth_r=args.smooth_r,
+                               smooth_r=args.smooth_r, destripe=not args.no_destripe,
                                confirm_s=args.confirm_s)
     log('detector', **det.describe())
     dropper = DropperClient(args.conf, fake=not args.real_moku, log=print)
@@ -301,13 +347,13 @@ def attempt_load(src, frames_iter, args, log, preview):
                     detect_duration_s=r['duration_s'])
             if r['state'] == 'confirmed':
                 log('confirmed', x=r['x'], y=r['y'], duration_s=r['duration_s'])
-                return 'loaded'
+                return 'loaded', (r['x'], r['y']), base
             if stopped_at_candidate and r['state'] in ('empty',):
                 log('candidate_lost', after_s=t - t_candidate)
-                return 'lost'
+                return 'lost', None, None
             if not dropper.running and not stopped_at_candidate:
                 log('chirp_complete_no_particle', stopped=dropper.stopped)
-                return 'no-load'
+                return 'no-load', None, None
     finally:
         dropper.close()
         if args.real_moku:
@@ -338,15 +384,17 @@ def cmd_run(args):
         for attempt in range(1, args.max_attempts + 1):
             check_abort()
             log('attempt', n=attempt)
-            outcome = attempt_load(src, frames_iter, args, log, preview)
-            log('attempt_result', outcome=outcome)
+            outcome, where, base = attempt_load(src, frames_iter, args, log, preview)
+            log('attempt_result', outcome=outcome, at=where)
             if outcome in ('no-load', 'lost'):
                 continue
-            entry = measure_particle(src, args.trap_xy, args, log, save_dir=out)
+            entry = measure_particle(src, where, args, log, save_dir=out, baseline=base)
             src.set_exposure_us(args.exposure_us)      # back to the detection exposure
             verdict, why = decide(entry, args)
             ledger.set_field(entry['id'], 'decision', verdict, args.ledger)
             log('decision', verdict=verdict, why=why, id=entry['id'])
+            if verdict == 'no-particle':
+                continue                # nothing measurable after all: chirp again
             if verdict == 'accept':
                 result = f"ACCEPTED particle {entry['id']}: {why}. Loader stopped."
                 break
@@ -389,16 +437,28 @@ def make_source(args):
         d = np.load(args.replay)
         stack = d['frames'] if hasattr(d, 'files') else d
         scene, excess, _ = synth.real_scene(stack, args.replay_particle_xy, args.replay_scene_xy,
-                                            scene_half=args.replay_half, r_ap=args.r_ap)
-        c = args.replay_half
-        args.trap_xy = (float(c), float(c))
+                                            scene_half=replay_half(args), r_ap=args.r_ap)
+        hx, hy = replay_half(args)
+        args.trap_xy = (float(hx), float(hy))
         return sources.ReplaySource(scene, excess, args.replay_exposure_us, 255, fps=args.replay_fps,
                                     schedule=args.replay_schedule, delay_s=args.replay_delay_s,
                                     transit_scale=args.replay_transit,
                                     occupied_at_start=args.replay_occupied, serial=args.serial)
     import camera_io
     cam = camera_io.open_camera(args.serial, vendors=tuple(args.vendors))
-    return sources.LiveSource(cam, args.exposure_us)
+    return sources.LiveSource(cam, args.exposure_us, roi=args.roi)
+
+
+def replay_half(args):
+    """(half_w, half_h) of the replayed scene crop."""
+    return (args.replay_half, args.replay_half_y or args.replay_half)
+
+
+def region_mask(shape, args):
+    """Boolean mask of the trap region (a circle of --region-px about --trap-xy)."""
+    h, w = shape
+    yy, xx = np.mgrid[:h, :w]
+    return np.hypot(xx - args.trap_xy[0], yy - args.trap_xy[1]) <= args.region_px
 
 
 # ----------------------------------------------------------------------------- other commands
@@ -457,15 +517,20 @@ def cmd_measure(args):
         src = make_source(args)
     try:
         entry = measure_particle(src, args.trap_xy, args, log, reference_mass_pg=args.reference_mass_pg,
-                                 save_dir=None if args.from_npy else out)
+                                 save_dir=None if args.from_npy else out, search_r=args.region_px)
     finally:
         src.close()
     verdict, why = decide(entry, args)
+    print(f"photometry: {entry['photometry_method']}, significance {entry['significance']:.1f} sigma")
     print(f"\nentry {entry['id']}: B = {entry['brightness']:.4g} {entry['brightness_unit']}; "
           f"decision would be {verdict}: {why}")
     r5 = entry.get('min_detectable_ratio_5sigma_frame')
+    rs = entry.get('min_sizable_ratio_5sigma_annulus')
+    if rs:
+        print(f"5-sigma annulus SIZING limit (no empty baseline): B/B_this = {rs:.3g}; the run loop "
+              f"sizes faint particles by difference photometry instead (~0.004 at 50 ms, 2026-09-28)")
     if r5:
-        print(f"5-sigma single-frame detection limit: B/B_this = {r5:.3g}")
+        print(f"5-sigma single-frame DETECTION floor (temporal noise): B/B_this = {r5:.3g}")
         d_ref = size_model.diameter_from_mass((args.reference_mass_pg or 10.0) * 1e-15)
         for pol in args.pol_deg:
             ds = [d for d in np.geomspace(50e-9, d_ref, 200)
@@ -479,18 +544,19 @@ def cmd_replay(args):
     """G3: detector on real scene frames with injected real-PSF particles."""
     import synth
     st = np.load(args.replay)
+    st = st['frames'] if hasattr(st, 'files') else st
     scene, excess, tot = synth.real_scene(st, args.replay_particle_xy, args.replay_scene_xy,
-                                          scene_half=args.replay_half, r_ap=args.r_ap)
+                                          scene_half=replay_half(args), r_ap=args.r_ap)
     n = len(scene)
     nb = args.n_baseline
-    c = args.replay_half
+    c = replay_half(args)
     fps = args.replay_fps
     res = {'excess_net_counts': tot, 'n_frames': n, 'cases': []}
 
     def run_case(name, frames):
-        d = det_mod.TrapDetector(frames[:nb], region_center=(c, c), region_radius=args.region_px,
+        d = det_mod.TrapDetector(frames[:nb], region_center=c, region_radius=args.region_px,
                                  k_sigma=args.k_sigma, persist_s=args.persist_s,
-                                 smooth_r=args.smooth_r,
+                                 smooth_r=args.smooth_r, destripe=not args.no_destripe,
                                  confirm_s=args.confirm_s)
         first = {}
         for i, f in enumerate(frames[nb:]):
@@ -506,10 +572,10 @@ def cmd_replay(args):
     for scale in args.scales:
         fr = sc.copy()
         fr[nb + onset:] += scale * ex[nb + onset:]
-        first = run_case(f'scale {scale}', np.clip(np.round(fr), 0, 255))
+        first = run_case(f'scale {scale}', synth.requantize(fr, 255, rng))
         res['cases'].append({'case': 'trapped', 'scale': scale, 'first': first,
                              'expected': 'confirmed' if scale >= args.expect_min_scale else 'any'})
-    first = run_case('empty', np.clip(np.round(sc), 0, 255))
+    first = run_case('empty', synth.requantize(sc, 255, rng))
     res['cases'].append({'case': 'empty', 'first': first, 'expected': 'no candidate'})
     # falling transit: the particle cut-out swept vertically through the scene in ~0.4 s
     fr = sc.copy()
@@ -523,7 +589,7 @@ def cmd_replay(args):
         elif shift < 0:
             e[shift:] = 0
         fr[nb + onset + j] += args.transit_scale * e
-    first = run_case('transit', np.clip(np.round(fr), 0, 255))
+    first = run_case('transit', synth.requantize(fr, 255, rng))
     res['cases'].append({'case': 'transit', 'scale': args.transit_scale, 'first': first,
                          'expected': 'no candidate'})
     ok = True
@@ -574,16 +640,27 @@ def build_parser():
                             "does not hold the Thorlabs camera (discovery segfaulted otherwise)")
         p.add_argument('--exposure-us', type=float, default=50000)
         p.add_argument('--min-exposure-us', type=float, default=2000)
-        p.add_argument('--max-exposure-us', type=float, default=100000)
+        p.add_argument('--max-exposure-us', type=float, default=140000,
+                       help='photometry ladder ceiling; the 300-row ROI allows ~156 ms')
         p.add_argument('--n-measure', type=int, default=60, help='frames per photometry rung')
         p.add_argument('--r-ap', type=int, default=photometry.DEFAULT_R_AP)
-        p.add_argument('--trap-xy', type=float, nargs=2, default=TRAP_XY)
-        p.add_argument('--region-px', type=float, default=250.0,
-                       help='trap-region radius: detections must stay inside it')
+        p.add_argument('--trap-xy', type=float, nargs=2, default=TRAP_XY,
+                       help='nominal trap position, FULL-SENSOR pixels (converted into the ROI)')
+        p.add_argument('--roi', type=int, nargs=4, default=DEFAULT_ROI, metavar=('X', 'Y', 'W', 'H'),
+                       help='x-cam AOI; full width because the trap z (horizontal) varies. '
+                            "'--roi 0 0 0 0' = full sensor")
+        p.add_argument('--region-px', type=float, default=600.0,
+                       help='trap-region radius: detections must stay inside it (falling '
+                            'particles are rejected by the drift/speed test, not by this)')
         p.add_argument('--pol-deg', type=float, nargs='+', default=[0.0, 45.0, 90.0],
                        help='z-laser polarisation vs x-cam axis; all three = unknown')
         p.add_argument('--na', type=float, default=0.1, help='x-cam collection NA (model only)')
-        p.add_argument('--accept-max-nm', type=float, default=300.0)
+        p.add_argument('--accept-max-nm', type=float, default=1000.0,
+                       help='accept only if EVERY sphere diameter consistent with the brightness '
+                            'is below this; reject if every one is above')
+        p.add_argument('--size-spread', type=float, default=0.0,
+                       help='log-normal size spread for the Mie curve; 0 = ideal spheres (deepest '
+                            'dips, most conservative), 0.1 = irregular clusters')
         p.add_argument('--ledger', default=ledger.DEFAULT_PATH)
         p.add_argument('--out-dir')
         p.add_argument('--telegram', action='store_true', help='also send the final alert to Telegram')
@@ -593,13 +670,19 @@ def build_parser():
         p.add_argument('--replay-scene-xy', type=float, nargs=2, default=(330.0, 330.0),
                        help='centre of a particle-free region used as the empty trap')
         p.add_argument('--replay-half', type=int, default=300)
+        p.add_argument('--replay-half-y', type=int, default=None,
+                       help='scene half-height if different (a strip ROI recording)')
         p.add_argument('--replay-exposure-us', type=float, default=49996)
         p.add_argument('--replay-fps', type=float, default=13.2)
         p.add_argument('--n-baseline', type=int, default=30)
         p.add_argument('--k-sigma', type=float, default=6.0)
         p.add_argument('--k-occupancy', type=float, default=5.0)
-        p.add_argument('--smooth-r', type=int, default=12,
-                       help='detector box-smoothing half-width (px), ~PSF scale')
+        p.add_argument('--smooth-r', type=int, default=25,
+                       help='detector box-smoothing half-width (px). 25 confirmed a 0.3%%-of-'
+                            'reference particle in replay (12: 0.5%%) with no false candidate '
+                            'in 66 s of empty scene (2026-09-28, lights off, 500 uW)')
+        p.add_argument('--no-destripe', action='store_true',
+                       help='skip the per-row read-noise removal in the detector')
         p.add_argument('--persist-s', type=float, default=0.5)
         p.add_argument('--confirm-s', type=float, default=3.0)
 
@@ -637,6 +720,11 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if getattr(args, 'trap_xy', None) is not None:
         args.trap_xy = tuple(args.trap_xy)
+    if getattr(args, 'roi', None) is not None:
+        args.roi = tuple(args.roi) if any(args.roi) else None
+        if args.roi and not getattr(args, 'replay', None) and not getattr(args, 'from_npy', None):
+            # every frame the loader sees is ROI-sized: move the trap into ROI pixels
+            args.trap_xy = (args.trap_xy[0] - args.roi[0], args.trap_xy[1] - args.roi[1])
     if args.cmd == 'run' and args.real_moku and args.replay:
         sys.exit("--real-moku with --replay makes no sense")
     return {'identify-cams': cmd_identify, 'measure': cmd_measure, 'replay': cmd_replay,

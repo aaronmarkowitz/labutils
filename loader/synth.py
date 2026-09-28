@@ -51,26 +51,42 @@ def inject(frames, track, sigma, total, start=0):
     return out
 
 
+def requantize(frame, saturation_level=255, rng=None):
+    """Integer camera counts from (integer scene + injected float signal),
+    by unbiased stochastic rounding: floor(x + U[0,1)). The real camera adds the
+    signal before quantization and its read noise dithers sub-count signals;
+    plain rounding would instead delete any injected signal < 0.5 count/px
+    (a 1%-of-reference particle is < 0.25 count/px at 50 ms, lights off).
+    An integer frame comes back unchanged."""
+    rng = np.random.default_rng() if rng is None else rng
+    f = np.asarray(frame, dtype=float)
+    return np.clip(np.floor(f + rng.random(f.shape)), 0, saturation_level)
+
+
 def real_scene(stack, particle_xy, scene_xy, scene_half=150, cut_half=110, r_ap=80):
     """Split real frames into (scene, excess): `scene` is a particle-free crop
-    centred at scene_xy; `excess` is the particle cut-out (annulus-subtracted,
+    centred at scene_xy (scene_half: int, or (half_w, half_h) for a strip ROI);
+    `excess` is the particle cut-out (annulus-subtracted,
     per frame) centred at particle_xy, same size as the scene crop.
     Returns (scene, excess, excess_total_counts) -- excess_total is the mean
     net aperture flux of the cut-out, so a scale s injects s * that flux."""
     stack = np.asarray(stack, dtype=float)
+    hx, hy = (scene_half, scene_half) if np.isscalar(scene_half) else map(int, scene_half)
     sx, sy = int(scene_xy[0]), int(scene_xy[1])
-    scene = stack[:, sy - scene_half:sy + scene_half, sx - scene_half:sx + scene_half]
+    scene = stack[:, sy - hy:sy + hy, sx - hx:sx + hx]
+    if scene.shape[1:] != (2 * hy, 2 * hx):
+        raise ValueError(f"scene crop {scene.shape[1:]} runs off the frame {stack.shape[1:]}")
     px, py = int(round(particle_xy[0])), int(round(particle_xy[1]))
     cut = stack[:, py - cut_half:py + cut_half, px - cut_half:px + cut_half]
     exc = np.zeros_like(scene)
-    o = scene_half - cut_half
+    ox, oy = hx - cut_half, hy - cut_half
     for i, c in enumerate(cut):
         _, bk, _ = aperture_sum(c, cut_half, cut_half, r_ap, r_ap + 10, r_ap + 25)
         e = c - bk
         rr = np.hypot(*np.meshgrid(np.arange(2 * cut_half) - cut_half,
                                    np.arange(2 * cut_half) - cut_half))
         e[rr > r_ap + 25] = 0.0
-        exc[i, o:o + 2 * cut_half, o:o + 2 * cut_half] = e
-    tot = float(np.mean([aperture_sum(exc[i], scene_half, scene_half, r_ap, r_ap + 10, r_ap + 25)[0]
+        exc[i, oy:oy + 2 * cut_half, ox:ox + 2 * cut_half] = e
+    tot = float(np.mean([aperture_sum(exc[i], hx, hy, r_ap, r_ap + 10, r_ap + 25)[0]
                          for i in range(len(exc))]))
     return scene, exc, tot

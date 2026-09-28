@@ -143,11 +143,25 @@ def signal_curve(diameters_m, **kw):
     return np.array([collected_signal(d, **kw) for d in diameters_m])
 
 
-DEFAULT_GRID_M = np.geomspace(20e-9, 6e-6, 700)
+# 0.25% steps: the n=2.4 Mie dips above 1 um are ~10 nm wide, and a coarser grid
+# steps over their bottoms (the dimmest a >= 1 um sphere can look).
+DEFAULT_GRID_M = np.geomspace(20e-9, 6e-6, 2300)
+
+
+def spread_curve(C, grid_m, size_spread):
+    """Average C over a log-normal size spread (sigma = size_spread in ln d).
+    Irregular clusters and polydisperse samples wash out the sharp-sphere Mie
+    dips; size_spread = 0 keeps the ideal-sphere curve (the conservative case:
+    deepest dips, so a large particle can look dimmest)."""
+    if not size_spread:
+        return C
+    ld = np.log(grid_m)
+    w = np.exp(-0.5 * ((ld[None, :] - ld[:, None]) / size_spread) ** 2)
+    return (w @ C) / w.sum(1)
 
 
 def estimate_diameter(brightness, refs, grid_m=DEFAULT_GRID_M, rel_tol=0.5,
-                      pols=(0.0, 45.0, 90.0), **kw):
+                      pols=(0.0, 45.0, 90.0), size_spread=0.0, **kw):
     """Diameters consistent with `brightness`, given reference particles.
 
     refs: list of (brightness_ref, d_ref_m). The model scale for each polarisation
@@ -155,6 +169,8 @@ def estimate_diameter(brightness, refs, grid_m=DEFAULT_GRID_M, rel_tol=0.5,
     when |log(B / (scale * C(d)))| < log(1 + rel_tol) for ANY polarisation in
     `pols`. Returns dict with the candidate range, the central estimate at the
     middle polarisation, and whether the curve was multi-valued.
+    size_spread > 0 compares against the size-averaged curve (spread_curve),
+    applied to the references too.
     """
     if not refs:
         raise ValueError("need at least one reference particle to set the scale")
@@ -162,8 +178,8 @@ def estimate_diameter(brightness, refs, grid_m=DEFAULT_GRID_M, rel_tol=0.5,
     central = None
     multi = False
     for pol in pols:
-        C = signal_curve(grid_m, pol_deg=pol, **kw)
-        logscale = np.mean([math.log(Br / collected_signal(dr, pol_deg=pol, **kw))
+        C = spread_curve(signal_curve(grid_m, pol_deg=pol, **kw), grid_m, size_spread)
+        logscale = np.mean([math.log(Br / np.interp(math.log(dr), np.log(grid_m), C))
                             for Br, dr in refs])
         pred = logscale + np.log(C)
         ok = np.abs(math.log(brightness) - pred) < math.log(1 + rel_tol)

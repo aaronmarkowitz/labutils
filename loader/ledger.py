@@ -64,10 +64,11 @@ def set_field(entry_id, key, value, path=DEFAULT_PATH):
     return hit[0]
 
 
-def references(rows, camera_serial=None, x_laser_on=None):
+def references(rows, camera_serial=None, x_laser_on=None, r_ap=None):
     """(B, d_ref_m, id) for rows with an independent size, optionally restricted
-    to the same camera and x-laser state (the reference is only valid for the
-    same illumination and imaging)."""
+    to the same camera, x-laser state and photometry aperture (the reference is
+    only valid for the same illumination, imaging and aperture: the aberrated PSF
+    has wide wings, so r_ap 50 holds ~half the r_ap 80 flux)."""
     from size_model import diameter_from_mass
     out = []
     for r in rows:
@@ -77,6 +78,8 @@ def references(rows, camera_serial=None, x_laser_on=None):
         if camera_serial is not None and r.get('camera_serial') != camera_serial:
             continue
         if x_laser_on is not None and r.get('x_laser_on') is not None and r['x_laser_on'] != x_laser_on:
+            continue
+        if r_ap is not None and r.get('r_ap') is not None and int(r['r_ap']) != int(r_ap):
             continue
         if r.get('reference_d_m'):
             out.append((B, float(r['reference_d_m']), r['id']))

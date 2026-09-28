@@ -2,44 +2,65 @@
 
 ## §0 Current session (2026-09-28, branch `feat/particle-loader`)
 
-**Status: loader built and tested up to the eject step. Not merged, not pushed. No real
-Moku output and no electrode drive. The camera (IDS SN 4103314187) was opened read-only.**
+**Status: loader rebuilt for the new x-cam configuration and tested up to the eject step
+(replay + fake Moku). Not merged, not pushed. No real Moku output, no electrode drive.
+Camera IDS SN 4103314187 opened read-only.**
 
 ### Goal
 Automate loading: chirp dropper → detect particle on x cam → cancel → photometry → size
-estimate → reject µm / accept ~100s nm → alert. Eject stays disabled until agreed.
+estimate → reject ≥1 µm / accept sub-µm → alert. Eject stays disabled until agreed.
 
-### Done and verified
-- `loader/load_particle.py` subcommands `identify-cams | measure | replay | run | ledger`.
-  Modules: `photometry.py`, `detector.py`, `size_model.py` (BH Mie), `ledger.py`,
-  `sources.py`, `dropper_client.py`, `eject.py` (plan only), `synth.py`.
-- Dropper: `moku/sweep_core.py` (importable loop and plan), `moku/dropper_server.py` (moku-env
-  child; stop, EOF and heartbeat deadman; refuses a ramp beyond the rail), `moku/fake_moku.py`.
-  `moku/sweep.py` is now a thin CLI. Golden test: identical call sequence to ca43d95,
-  plus one intended `Off` before `set_defaults`.
-- `cameras/camera_io.py`: headless raw counts. IDS reuses `dualcam_fast.IDSCamera`
-  (imported, not moved). Thorlabs path written but UNTESTED: Thorlabs discovery from a
-  second process segfaulted while dualcam held that camera.
-- Tests: `pytest` 162 passed, 4 skipped (hardware loopback); `-m control` 11 passed;
-  `size_model.py --self-test` PASSED.
-- Ledger `~/Dropbox/Microspheres/MAST-QG/worker1/data/particle_ledger.jsonl`:
-  reference `260928_153227_67f7` (10 pg Epstein, x laser off, B=2.42e5 cps/kPOZ,
-  1.04e6 counts/s at 50 ms, r_ap 80 px, trap (765,636)).
-- G3 replay (real frames, injected real PSF): confirmed at ≥5% of reference brightness,
-  candidate only at 3%, unseen ≤2%; empty and 0.4 s transit do not fire.
-- G4 loop (fake Moku, replay): detect 0.54 s after appearance (real). Stop latency 0.05 s is
-  the fake's SIMULATED call latency, not a measurement; real Moku latency unmeasured. Then
-  reject → simulated eject → second particle at 5% → ambiguous [247, 949] nm (Mie minimum).
-- G5 live x cam, fake Moku: trap occupied, so no chirp → measured → reject → stop.
+### New configuration (Alma, 2026-09-28 pm)
+Room lights off, camera covered, z laser 200 → 500 µW (POZ_INMON 4296 → 9875).
+Loader default ROI `(0, 500, 1280, 300)`: full width, because the trap z (horizontal
+on the x cam) varies. The trap particle sits at ROI (788, 145), i.e. full frame (788, 645).
 
-### Open (Alma's calls; see the session report)
-x-cam identity; z polarisation vs x-cam axis; x-cam focus (PSF ~50 px FWHM); background
-2.2 counts/ms/px; x laser on during loading?; accept threshold (300 nm default); eject procedure.
+### Verified this pass (data: `~/Dropbox/.../data/260928/particle_loader/newconfig_lightsoff_500uW/`)
+- **POZ normalisation holds:** B = 2.45e5 at r_ap 80 vs reference 2.424e5 (1.01; live
+  `measure --roi` 2.40e5; recorded-stack `measure` 2.48e5). cps ×2.33 for POZ ×2.30.
+  So reference `260928_153227_67f7` stays valid.
+- Background 0.07 counts/ms/px (was 2.2). Temporal aperture σ ≈ 190 counts/frame at 50 ms.
+- **Detection** (replay of real frames, fake quantisation fixed): confirmed down to
+  B/B_ref = 0.003 with smooth_r 25 (0.005 at 12). No false candidate in 1170 frames (66 s)
+  of the particle-free left strip. The right strip raises false candidates from the
+  trapped particle's halo; that can't happen mid-chirp, because the trap is empty then.
+- **Sizing:** annulus photometry is limited by fixed-pattern background, 5σ ≈ 0.026–0.033.
+  NEW difference photometry against the pre-chirp empty baseline recovers injected flux
+  to within a few % down to 0.003 (5σ floor ≈ 0.004 at 50 ms, 60 frames). It is used when
+  annulus significance < 20σ_sp. The control (annulus on the same injection) is biased by ~−130 counts.
+- **Rule (Alma):** reject ≥ 1 µm, accept sub-µm (`--accept-max-nm 1000`). Worst-case
+  dimmest ≥1 µm sphere on a fine Mie grid: 0.043 (ideal spheres, pol 0, 1096 nm dip);
+  0.31 with a 10 % log-normal size spread. decide() table: `newconfig.../decide_table.py`
+  output in the session report. spread 0: accept for B/B_ref ≲ 0.035, and the reference
+  itself is *ambiguous*. spread 0.1: accept ≲ 0.1–0.3, reject B = 1 ([1351, 2252] nm).
+- Smallest detectable sphere at 0.003: ~160–180 nm (pol 90), ~205–225 (pol 45),
+  ~265–310 (pol 0). Size of a single ~100 nm nanodiamond: B/B_ref ~1e-4, still undetectable.
+- G4 loop on new data (fake Moku, r_ap 50, spread 0.1): reference-like particle → reject →
+  simulated eject → 1 % particle detected, stopped at 0.50 s, sized by difference photometry
+  (38.7σ, measured ratio 0.0099) → ACCEPT [212, 307] nm → alert.
+- Tests: pytest 175 passed / 4 skipped; `-m control` 18 passed.
+
+### Fixed this pass
+Replay rounding deleted sub-count signals (now `synth.requantize`, stochastic).
+Detector searched edge pixels (the null max was always at the frame edge). A NaN noise floor gave
+significance = inf (now NaN → ambiguous). References were not matched on r_ap. The aperture started
+at the detector's bright-side position (~50 px off) and lost 20–60 % of the flux (now re-centred).
+A 'no-particle' guard stops a noise "confirm" from being accepted. Occupancy also tests the
+brightest spot in the region (the trap z varies).
+Tried and removed: a per-frame gain fit (made false alarms worse; errors-in-variables).
+Kept but with no measured effect: row destripe (`--no-destripe`).
+
+### Open (Alma's calls)
+`--size-spread` default (0 now; the 0.1 question is in the session report); x-cam identity;
+z polarisation vs x-cam axis; x laser on during loading?; eject procedure; merge/push/wiki.
 
 ### Next commands (thorcam env, from `loader/`)
-    conda run --no-capture-output -n thorcam python load_particle.py measure            # re-measure
+    conda run --no-capture-output -n thorcam python load_particle.py measure            # re-measure (ROI default)
     conda run --no-capture-output -n thorcam python load_particle.py run                # fake Moku
     conda run --no-capture-output -n thorcam python load_particle.py run --real-moku    # real chirp (after approval)
+    # replay a new-config stack (strip ROI):
+    python load_particle.py replay --replay <dir>/long400.npz --replay-particle-xy 786 144 \
+        --replay-scene-xy 280 150 --replay-half 270 --replay-half-y 150 --replay-exposure-us 49996 --replay-fps 17.87
 
 ## §1 Previous session (2026-09-10, branch `harness-2026-09`, since merged in 9fb86a6)
 
