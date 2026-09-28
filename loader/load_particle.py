@@ -660,9 +660,11 @@ def build_parser():
         p.add_argument('--accept-max-nm', type=float, default=1000.0,
                        help='accept only if EVERY sphere diameter consistent with the brightness '
                             'is below this; reject if every one is above')
-        p.add_argument('--size-spread', type=float, default=0.0,
-                       help='log-normal size spread for the Mie curve; 0 = ideal spheres (deepest '
-                            'dips, most conservative), 0.1 = irregular clusters')
+        p.add_argument('--size-spread', type=float, default=0.1,
+                       help='log-normal size spread for the Mie curve. 0.1 = irregular clusters '
+                            '(Alma, 2026-09-28): accepts B/B_ref < ~0.1 (<~800 nm), rejects the '
+                            '10 pg reference. 0 = ideal spheres: accepts only < ~0.035 and rejects '
+                            'nothing (the reference itself is ambiguous)')
         p.add_argument('--ledger', default=ledger.DEFAULT_PATH)
         p.add_argument('--out-dir')
         p.add_argument('--telegram', action='store_true', help='also send the final alert to Telegram')

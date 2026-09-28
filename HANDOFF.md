@@ -55,7 +55,7 @@ Tried and removed: a per-frame gain fit (made false alarms worse; errors-in-vari
 Kept but with no measured effect: row destripe (`--no-destripe`).
 
 ### Open (Alma's calls)
-`--size-spread` default (0 now; the 0.1 question is in the session report); x-cam identity;
+`--size-spread` default now 0.1 (clusters; Alma chose 2026-09-28). Still open: x-cam identity;
 z polarisation vs x-cam axis; x laser on during loading?; eject procedure; merge/push/wiki.
 
 ### Next commands (thorcam env, from `loader/`)
