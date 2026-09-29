@@ -2,41 +2,31 @@
 
 ## §0 Current session (2026-09-29, branch `feat/particle-loader`)
 
-**Status: auto-ROI (alignment-robust), circular polarisation, x-laser preflight and the
-rotating-field eject (plan + dark-run command) are in and tested. Not merged, not pushed.
-No real Moku output, no electrode drive, no CDS write. The x cam was opened read-only.**
-**Eject dark run DONE 11:14 (Alma approved):** outputs off → sweep → restored (all 8 `IN,OT,DC`,
-SPIN back to FREQ 5000 / TRAMP 5 / gains 0). POLES_E1–4_OUT_DQ excursion **0.0** (nothing reached
-a DAC). SINGAIN follows COSGAIN (both ≈19200 = A). Quadrature holds: E3 drive synthesised from
-the recorded COS/SIN peaks at **32000** exactly (the planned figure; 40037 would mean lost
-quadrature); |(cos, sin)| ≤ 19212. Block estimates of ±5° below 7 Hz are a 1 s window artefact
-(1–2 cycles); above 7 Hz the error is < 0.7°. Sweep took ~42 s, not 30 s (caput overhead ~0.03 s/step).
-FREQ-ramps-over-TRAMP was not determined (irrelevant given the gain-first ordering).
-Data: `data/260929/eject_dark/dark_111424.{json,npz}`.
-**REAL EJECT DONE 11:29 (Alma approved; `load_particle.py eject --go`, preview on :0):** the 10 pg
-reference particle (418σ at (784, 645)) left at t = 3.74 s, ~0.5 s into the 2 s COSGAIN ramp at
-1 Hz (≈25 % amplitude, ~5000 counts), before the sweep proper. Low vacuum: far less drive would do.
-Afterwards SPIN is back to 0 / 5000 Hz / TRAMP 5. The run went all 3 sweeps: the per-sweep occupancy
-check was fooled by a corner glow (fixed: must be ≥ 10 % of the pre-eject flux). Data:
-`data/260929/particle_loader/eject_112918/` (events, per-frame flux/peak time series, before/after
-means). The Epstein-mass reference particle is gone: `--reference-from` can't transfer the
-calibration across a future realignment without a new mass measurement.
-**Dark EMPTY full frame measured** (`data/260929/particle_loader/empty_dark_full_50ms.npz`,
-300 frames; template = before − after of the ejected particle):
-- Pre-chirp gate FIXED: plain annulus occupancy read the top-right corner glow (~+0.4 counts
-  over ~250 px) as occupied in 8/10 empty windows. The new full-frame gate high-passes the frame
-  (401-px box), searches ≥ 100 px from the edge, and uses k_gate 6. Real empty windows ≤ 1.4σ;
-  1 % particle 9.9σ, 2 % 20σ. Live fake-Moku run (empty, dark): gate 1.1σ → chirp started.
-- Detector, same stack: strip and full frame both detect 0.01 and miss 0.005, so the geometry costs
-  nothing at that resolution. The static 30-frame-mean template is blurrier than the 09-28 per-frame
-  replay, hence 0.01 not 0.003. Excluding the glow box (x ≥ 1000, y < 300) makes 0.007 detectable.
-- **Open, blocks real loading:** in the live fake-Moku run the detector's null std was 0.042 (the
-  recorded stack gave 0.015), and a FALSE candidate fired at (1253, 352) after 97 s, on the right
-  edge just below the glow box. Likely the glow drifting as the sensor warms. Benign (stops the
-  chirp → 'lost' → re-chirp) but it wastes attempts. Next: widen the edge/glow exclusion or
-  refresh the baseline, and re-measure on a > 3 min empty stream. Loop timing with preview:
-  median 71.6 ms, p95 78 ms (keeps up).
-Waiting on Alma: real chirp (low vacuum), merge/push/wiki.
+**Status 13:40 — checkpoint merged to main + pushed (Alma approved merge/push/wiki).**
+- **Preview on top:** `loader/window_top.py` sends EWMH `_NET_WM_STATE_ABOVE` via ctypes/libX11
+  (Qt highgui ignores WND_PROP_TOPMOST; no wmctrl/xdotool). Verified: xprop → `ABOVE, FOCUSED`.
+- **Full-frame false alarms FIXED.** Diagnosis (`data/260929/particle_loader/diag_empty_before/`,
+  2 fake ramps, 6 min dark): after ~70 s the score STEPPED to z≈3.5 and stayed (argmax top-left
+  200 px, +0.04 counts); ramp 2's null std was 0.0019 (30 frames, max pinned on one glow pixel)
+  → single frames to z 21. Loop 112–119 ms/frame (camera 72 ms) with the CPU shared (another
+  session's 8 jobs at 100 %). Fix: detector high-pass (−200 px box level) + 100 px edge margin
+  + 2×2 binning on the full frame (28 ms/frame). After (`diag_empty_after/`): ramp 1 null std
+  0.0037 (ramp 2 0.0032), median z −0.6, z>6 in 0.12 % of frames, never 2 in a row; loop 71.6 ms.
+  Residual z 5–6 flicker at the margin boundary (x 104/1178) at t≈175 s: watch it.
+- **Lights came ON at ~13:21:33** mid ramp 2 (whole frame → 255); the detector "confirmed" the lit
+  frame (id `260929_132215_27c7`, no-particle, junk row). New **scene guard** (`scene_problem`):
+  saturation > 1 %, median > 10 counts or a > 2 count median shift → refuse / stop the chirp /
+  stop the eject (SceneChanged). Still lit at 13:30 (median 255).
+- Tests: 95 passed in loader+moku (control tests included).
+- **Also on the branch (NOT merged; merges at the next approval):** `--start-amp` resume
+  (sweep_core.resume_conf, dropper_server, run), `--auto-eject` with the camera-watched
+  `eject_watched` (continuous early stop < 10 % flux for 1 s; one eject per particle), hand-back
+  rules (2 empty ramps, wall limit, occupied-after-eject, SPIN readback, stale baseline → ambiguous).
+
+Earlier today: eject dark run (11:14, quadrature holds, POLES excursion 0.0,
+`data/260929/eject_dark/`) and the REAL eject (11:29, the 10 pg reference left 0.5 s into the
+gain ramp at ~25 % amplitude, `data/260929/particle_loader/eject_112918/`). The Epstein-mass
+reference particle is gone. Full-frame gate: real empty ≤ 1.4σ; 1 % particle 9.9σ.
 
 ### Goal
 Automate loading: chirp dropper → detect on x cam → cancel → photometry → size → reject

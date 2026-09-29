@@ -73,6 +73,31 @@ class Abort(Exception):
     pass
 
 
+class SceneChanged(Abort):
+    """The x-cam scene is no longer the dark one the detector was calibrated on
+    (lights on / cover off: 2026-09-29 13:21 the whole frame went to 255 mid-ramp,
+    and the detector 'confirmed' the lit frame)."""
+
+
+SCENE_MAX_MEDIAN = 10.0      # counts at the detection exposure; the dark frame is ~4
+SCENE_MAX_SHIFT = 2.0        # counts of frame-median change vs the pre-chirp baseline
+SCENE_MAX_SAT_FRAC = 0.01
+
+
+def scene_problem(frame, ref_median, saturation_level):
+    """None, or why this frame is not the dark scene (subsampled: cheap per frame)."""
+    f = np.asarray(frame)[::8, ::8]
+    med = float(np.median(f))
+    sat = float((f >= saturation_level).mean())
+    if sat > SCENE_MAX_SAT_FRAC:
+        return f"{100 * sat:.0f} % of pixels saturated"
+    if med > SCENE_MAX_MEDIAN:
+        return f"frame median {med:.1f} counts > {SCENE_MAX_MEDIAN:g} (lights on / cover off?)"
+    if ref_median is not None and abs(med - ref_median) > SCENE_MAX_SHIFT:
+        return f"frame median moved {med - ref_median:+.1f} counts since the baseline"
+    return None
+
+
 # ----------------------------------------------------------------------------- utils
 
 def caget_all(pvs=PVS, timeout=3.0):
@@ -144,6 +169,8 @@ class Preview:
         self.enabled = enabled and bool(os.environ.get('DISPLAY'))
         self.center, self.radius = center, radius
         self.lo = self.hi = None
+        self._raised = -1e9
+        self._on_top = False
         if self.enabled:
             import cv2
             self.cv2 = cv2
@@ -168,6 +195,14 @@ class Preview:
             cv2.circle(img, c, int(self.radius / k), (0, 200, 255), 2)
         cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.imshow('particle loader', img)
+        # Keep the preview above other windows (Alma, 2026-09-29). Qt highgui ignores
+        # WND_PROP_TOPMOST on Linux, so ask the WM directly (window_top.py); retry
+        # until the window is mapped, then only once more a minute.
+        now = time.monotonic()
+        if now - self._raised > (60.0 if self._on_top else 1.0):
+            self._raised = now
+            import window_top
+            self._on_top = window_top.raise_above('particle loader') or self._on_top
         if (cv2.waitKey(1) & 0xFF) == ord('q'):
             raise Abort("'q' pressed in preview")
 
@@ -354,6 +389,10 @@ def attempt_load(src, frames_iter, args, log, preview):
     if args.auto_roi:
         full_frame(src, args, log)
     base, _ = baseline_stack(frames_iter, args.n_baseline)
+    ref_median = float(np.median(base[:, ::8, ::8]))
+    why = scene_problem(base[-1], None, src.saturation_level)
+    if why:
+        raise SceneChanged(f"refusing to chirp: {why}")
     # The particle does not always trap at the same z (x-cam horizontal): test the
     # nominal trap AND the brightest spot in the trap region (the whole frame
     # under --roi auto, where the trap position is not assumed).
@@ -369,7 +408,12 @@ def attempt_load(src, frames_iter, args, log, preview):
                                k_sigma=args.k_sigma, persist_s=args.persist_s,
                                smooth_r=args.smooth_r, destripe=not args.no_destripe,
                                confirm_s=args.confirm_s,
-                               exclude=glow_exclude(base.shape[1:], args.roi))
+                               exclude=glow_exclude(base.shape[1:], args.roi),
+                               # Full frame: broad glow changes at the corners/edges
+                               # scored z~3.5 for minutes on 2026-09-29 (diag_empty_before)
+                               **({'highpass_r': HIGHPASS_R, 'edge_px': HIGHPASS_MARGIN,
+                                   'bin': DETECT_BIN_FULL}
+                                  if args.trap_xy is None and not args.no_highpass else {}))
     log('detector', **det.describe())
     dropper = DropperClient(args.conf, fake=not args.real_moku, log=print)
     log('dropper_ready', **{k: dropper.ready.get(k) for k in
@@ -379,6 +423,8 @@ def attempt_load(src, frames_iter, args, log, preview):
     stopped_at_candidate = False
     t_candidate = None
     t_frames = []
+    trace = []          # per-frame (t, z, x, y): the false-alarm diagnosis needs every frame
+    snaps, t_snap = [], -1e9     # a raw frame every 10 s, to see what a false alarm was
     try:
         dropper.start()
         src.on_dropper_start()
@@ -386,7 +432,17 @@ def attempt_load(src, frames_iter, args, log, preview):
         for f, t in frames_iter:
             check_abort()
             t_frames.append(time.time())
+            why = scene_problem(f, ref_median, src.saturation_level)
+            if why:
+                if dropper.running:
+                    dropper.stop()
+                log('scene_changed', why=why)
+                raise SceneChanged(f"scene changed during the chirp: {why}")
             r = det.update(f, t)
+            trace.append((t, r['score'], r['x'], r['y']))
+            if t - t_snap >= 10.0 or (r['state'] != 'empty' and t - t_snap >= 1.0):
+                snaps.append((t, np.asarray(f)))
+                t_snap = t
             dropper.ping()
             for ev in dropper.drain():
                 if ev['ev'] == 'pulse':
@@ -419,6 +475,15 @@ def attempt_load(src, frames_iter, args, log, preview):
             dt = np.diff(t_frames)
             log('loop_timing', n=len(t_frames), median_dt_s=float(np.median(dt)),
                 p95_dt_s=float(np.percentile(dt, 95)), max_dt_s=float(dt.max()))
+        if trace:
+            tr = np.array(trace, dtype=float)
+            path = os.path.join(log.dir, f"scores_{datetime.now().strftime('%H%M%S')}.npz")
+            np.savez_compressed(path, t=tr[:, 0], z=tr[:, 1], x=tr[:, 2], y=tr[:, 3],
+                                baseline_mean=base.mean(axis=0).astype(np.float32),
+                                null_std=det.null_std, null_mean=det.null_mean,
+                                snap_t=np.array([a for a, _ in snaps]),
+                                snaps=np.stack([b for _, b in snaps]) if snaps else np.zeros(0))
+            log('score_trace', path=path, n=len(tr), max_z=float(tr[:, 1].max()))
         dropper.close()
         if args.real_moku:
             caput('Y1:AUX-DROPPER_ON', 0)
@@ -559,6 +624,9 @@ def region_mask(shape, args):
 GLOW_BOX_FULL = (1000, 0, 1280, 300)     # x0, y0, x1, y1 in full-sensor pixels
 HIGHPASS_R = 200
 HIGHPASS_MARGIN = 100
+# Full-frame detection works on 2x2-binned frames: unbinned it took ~90 ms/frame
+# with the CPU shared, more than the 72 ms camera period (2026-09-29).
+DETECT_BIN_FULL = 2
 
 
 def glow_exclude(shape, roi):
@@ -1064,6 +1132,8 @@ def build_parser():
                             'in 66 s of empty scene (2026-09-28, lights off, 500 uW)')
         p.add_argument('--no-destripe', action='store_true',
                        help='skip the per-row read-noise removal in the detector')
+        p.add_argument('--no-highpass', action='store_true',
+                       help='full frame: skip the detector high-pass and edge margin (control)')
         p.add_argument('--persist-s', type=float, default=0.5)
         p.add_argument('--confirm-s', type=float, default=3.0)
 

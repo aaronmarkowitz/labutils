@@ -200,3 +200,75 @@ def test_glow_exclude_follows_the_roi():
     assert lp.glow_exclude((300, 1280), (0, 496, 1280, 300)) is None      # strip below the glow
     m = lp.glow_exclude((300, 1280), (0, 100, 1280, 300))
     assert m[:200, 1000:].all() and not m[200:].any()
+
+
+# ------------------------------------------------ detector high-pass (2026-09-29 pm)
+# diag_empty_before: after ~70 s on the dark empty trap the full-frame detector
+# score stepped from z~-0.3 to ~3.5 and stayed there, argmax in the top-left
+# 200 px (raw smoothed excess +0.04 counts). A 1 % particle (of the 10 pg
+# reference, ~1350 counts at 50 ms) is a sigma=20 px blob of peak ~0.54 counts.
+
+def _corner_step(amp, xy=(0, 0), s=150.0):
+    yy, xx = np.mgrid[:1024, :1280].astype(float)
+    return amp * np.exp(-(((xx - xy[0]) / s) ** 2 + ((yy - xy[1]) / s) ** 2))
+
+
+def _stream_states(det, add, n=40, seed=7):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:1024, :1280].astype(float)
+    img = (3.5 + 0.6 * xx / 1280 + 0.5 * np.exp(-(((xx - 1280) / 220) ** 2 + (yy / 220) ** 2)))
+    return [det.update(rng.poisson(img + add).astype(float), 0.072 * i)['state'] for i in range(n)]
+
+
+def _full_det(highpass):
+    base = _glow_stack(n=30, seed=5)
+    kw = ({'highpass_r': lp.HIGHPASS_R, 'edge_px': lp.HIGHPASS_MARGIN, 'bin': lp.DETECT_BIN_FULL}
+          if highpass else {})
+    return D.TrapDetector(base, smooth_r=25, k_sigma=6.0, persist_s=0.5, confirm_s=2.0,
+                          exclude=lp.glow_exclude((1024, 1280), None), **kw)
+
+
+@pytest.mark.parametrize('xy', [(0, 0), (0, 1024), (1280, 500)])
+def test_highpass_detector_ignores_a_broad_edge_glow_step(xy):
+    # 0.5 counts: ~12x the measured step; the plain detector scores z~23 on it
+    states = _stream_states(_full_det(True), _corner_step(0.5, xy))
+    assert 'candidate' not in states and 'confirmed' not in states
+
+
+@pytest.mark.control
+def test_control_plain_detector_fires_on_the_same_glow_step():
+    states = _stream_states(_full_det(False), _corner_step(0.5, (0, 0)))
+    assert 'candidate' in states or 'confirmed' in states
+
+
+def test_highpass_detector_still_confirms_a_one_percent_particle():
+    yy, xx = np.mgrid[:1024, :1280].astype(float)
+    blob = 0.54 * np.exp(-((xx - 784) ** 2 + (yy - 645) ** 2) / (2 * 20 ** 2))
+    states = _stream_states(_full_det(True), blob)
+    assert 'confirmed' in states
+
+
+def test_binned_detector_reports_full_frame_coordinates():
+    yy, xx = np.mgrid[:1024, :1280].astype(float)
+    blob = 3.0 * np.exp(-((xx - 784) ** 2 + (yy - 645) ** 2) / (2 * 20 ** 2))
+    det = _full_det(True)
+    rng = np.random.default_rng(3)
+    img = 3.5 + 0.6 * xx / 1280
+    z, x, y = det.score(rng.poisson(img + blob).astype(float))
+    assert z > 20 and abs(x - 784) < 4 and abs(y - 645) < 4
+
+
+# ------------------------------------------------------ scene guard (2026-09-29)
+
+def test_scene_guard_passes_the_dark_frame():
+    f = _glow_stack(n=1, seed=2)[0]
+    assert lp.scene_problem(f, float(np.median(f[::8, ::8])), 255) is None
+
+
+@pytest.mark.control
+@pytest.mark.parametrize('bad', ['lit', 'saturated', 'shift'])
+def test_control_scene_guard_catches_lights_on(bad):
+    f = _glow_stack(n=1, seed=2)[0]
+    ref = float(np.median(f[::8, ::8]))
+    g = {'lit': f + 20, 'saturated': np.full_like(f, 255), 'shift': f + 3}[bad]
+    assert lp.scene_problem(g, ref, 255) is not None

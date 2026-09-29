@@ -28,10 +28,27 @@ class TrapDetector:
     def __init__(self, baseline, region_center=None, region_radius=None, smooth_r=12,
                  k_sigma=6.0, persist_s=0.5, confirm_s=3.0, frac_above=0.7,
                  max_net_drift_px=60.0, max_speed_px_s=200.0, gap_reset_frames=4,
-                 destripe=True, exclude=None):
-        base = np.asarray(baseline, dtype=float)
+                 destripe=True, exclude=None, highpass_r=None, edge_px=None, bin=1):
+        base = np.asarray(baseline, dtype=np.float32)
         if base.ndim != 3 or len(base) < 5:
             raise ValueError("baseline must be a stack of >= 5 frames")
+        # `bin` k: work on k x k binned frames (float32). The full frame costs
+        # ~90 ms/frame unbinned with the CPU shared (2026-09-29), more than the
+        # 72 ms camera period. All lengths below are given in FULL-frame pixels,
+        # and score() returns full-frame coordinates.
+        k = self.bin = int(bin)
+        self.full_shape = base.shape[1:]
+        if k > 1:
+            base = np.stack([bin_frame(f, k) for f in base])
+            if region_center is not None:
+                region_center = ((region_center[0] - (k - 1) / 2) / k,
+                                 (region_center[1] - (k - 1) / 2) / k)
+            region_radius = region_radius / k if region_radius is not None else None
+            smooth_r = max(1, int(round(smooth_r / k)))
+            highpass_r = max(1, int(round(highpass_r / k))) if highpass_r else None
+            edge_px = int(math.ceil(edge_px / k)) if edge_px else None
+            if exclude is not None:
+                exclude = bin_frame(np.asarray(exclude, np.float32), k) > 0
         self.shape = base.shape[1:]
         h, w = self.shape
         self.center = region_center if region_center is not None else (w / 2.0, h / 2.0)
@@ -40,7 +57,12 @@ class TrapDetector:
         self.smooth_r = int(smooth_r)
         # Search only where the smoothing box is fully inside the frame: edge
         # pixels average fewer samples, are noisier, and otherwise set the null max.
-        b = self.smooth_r
+        # `highpass_r` subtracts a broad (~2*highpass_r) local level from the smoothed
+        # difference, so a slowly-varying glow change cannot score while a compact
+        # particle still does; the high-pass is least reliable at the frame edge,
+        # hence `edge_px` (the full-frame occupancy gate uses the same pair).
+        self.highpass_r = int(highpass_r) if highpass_r else None
+        b = max(self.smooth_r, int(edge_px or 0))
         self.mask = ((np.hypot(xx - self.center[0], yy - self.center[1]) <= self.radius)
                      & (xx >= b) & (xx < w - b) & (yy >= b) & (yy < h - b))
         if exclude is not None:
@@ -82,6 +104,8 @@ class TrapDetector:
         if self.destripe:
             d = d - row_offsets(d)[:, None]
         s = box_smooth(d, self.smooth_r)
+        if self.highpass_r:
+            s = s - _broad_level(d, self.highpass_r)
         # Remove any uniform level change (laser power drift) before the max.
         s = s - np.median(s[self.mask])
         s = np.where(self.mask, s, -np.inf)
@@ -89,9 +113,14 @@ class TrapDetector:
         return float(s[iy, ix]), float(ix), float(iy)
 
     def score(self, frame):
-        """(sigma_score, x, y) of the brightest in-region excess in one frame."""
-        s, x, y = self._stat(np.asarray(frame, dtype=float), self.mean)
-        return (s - self.null_mean) / self.null_std, x, y
+        """(sigma_score, x, y) of the brightest in-region excess in one frame
+        (x, y in full-frame pixels)."""
+        f = np.asarray(frame, dtype=np.float32)
+        k = self.bin
+        if k > 1:
+            f = bin_frame(f, k)
+        s, x, y = self._stat(f, self.mean)
+        return (s - self.null_mean) / self.null_std, x * k + (k - 1) / 2, y * k + (k - 1) / 2
 
     def update(self, frame, t):
         """Feed one frame; returns dict(state, score, x, y, duration_s)."""
@@ -143,8 +172,26 @@ class TrapDetector:
         return {'threshold_sigma': self.k_sigma, 'null_mean': self.null_mean,
                 'null_std': self.null_std, 'region_center': self.center,
                 'region_radius': self.radius, 'smooth_r': self.smooth_r,
-                'destripe': self.destripe,
+                'destripe': self.destripe, 'highpass_r': self.highpass_r, 'bin': self.bin,
                 'persist_s': self.persist_s, 'confirm_s': self.confirm_s}
+
+
+def bin_frame(f, k):
+    """k x k block mean (float32), trailing rows/columns that do not fill a block dropped."""
+    h, w = f.shape[0] // k * k, f.shape[1] // k * k
+    return np.asarray(f[:h, :w], np.float32).reshape(h // k, k, w // k, k).mean((1, 3))
+
+
+def _broad_level(d, r, k=4):
+    """box_smooth(d, r) evaluated on a k x k binned copy and expanded back:
+    ~20x cheaper on the full frame than the exact box, and indistinguishable
+    from it at a scale r >> k (the high-pass only needs the ~2r-wide level)."""
+    h, w = d.shape
+    H, W = -(-h // k) * k, -(-w // k) * k
+    a = np.pad(d, ((0, H - h), (0, W - w)), mode='edge')
+    b = a.reshape(H // k, k, W // k, k).mean((1, 3))
+    lv = box_smooth(b, max(1, r // k))
+    return np.repeat(np.repeat(lv, k, 0), k, 1)[:h, :w]
 
 
 def row_offsets(d, n_chunks=16):
