@@ -348,6 +348,7 @@ def dark_run(plan, get=caget, put=caput, sleep=time.sleep, recorder=None, check_
         if recorder is not None and recorder._th.is_alive():
             sleep(1.0)
             rec = recorder.stop()
+            recorder.captured = rec          # survives an abort that skips the return
         gains = [float(get(f'{SPIN}_COSGAIN')), float(get(f'{SPIN}_SINGAIN'))]
         if any(gains):
             log(f"!! SPIN gains read {gains} after safe-off: spin-cell outputs LEFT OFF (safe). "
@@ -408,8 +409,15 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     rec_obj = NDSRecorder()
     t0 = time.strftime('%H%M%S')
-    result, rec = dark_run(plan, recorder=rec_obj, check_abort=_abort_file)
-    report = {'result': result, 'plan': plan, 'recorder_error': rec_obj.error, 'gps0': rec_obj.gps0}
+    err = None
+    try:
+        result, rec = dark_run(plan, recorder=rec_obj, check_abort=_abort_file)
+    except KeyboardInterrupt:           # Ctrl-C or the abort file: switches already handled
+        result, rec = 'aborted', getattr(rec_obj, 'captured', None)
+    except Exception as e:              # e.g. recorder refused to start: nothing was driven
+        result, rec, err = 'refused', getattr(rec_obj, 'captured', None), repr(e)
+    report = {'result': result, 'error': err, 'plan': plan, 'recorder_error': rec_obj.error,
+              'gps0': rec_obj.gps0}
     if rec:
         np.savez_compressed(os.path.join(args.out, f'dark_{t0}.npz'),
                             **{k.replace(':', '_'): v for k, v in rec.items()},

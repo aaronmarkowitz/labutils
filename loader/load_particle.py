@@ -589,7 +589,8 @@ def narrow_to_strip(src, where, base, args, log):
     roi = strip_roi(where[1], w, h, args.strip_h)
     src.set_roi(roi)
     if base is not None:
-        base = base[:, roi[1]:roi[1] + roi[3], roi[0]:roi[0] + roi[2]]
+        # copy: a view would keep the full-frame stack (~315 MB) alive through measure
+        base = base[:, roi[1]:roi[1] + roi[3], roi[0]:roi[0] + roi[2]].copy()
     args.roi = roi
     args.trap_xy = (float(where[0]) - roi[0], float(where[1]) - roi[1])
     log('roi', roi=roi, trap_full_xy=tuple(float(v) for v in where),
