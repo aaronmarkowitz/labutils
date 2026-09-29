@@ -384,6 +384,7 @@ def main(argv=None):
                     help='WRITES CDS: spin-cell outputs off, run the sweep, record over NDS2, restore '
                          '(one sweep unless --n-sweeps is given). Needs Alma\'s go.')
     ap.add_argument('--yes', action='store_true', help='skip the typed confirmation of --dark-run')
+    ap.add_argument('--json', action='store_true', help='print only the plan as JSON (read-only)')
     ap.add_argument('--out', default=os.path.expanduser(
         '~/Dropbox/Microspheres/MAST-QG/worker1/data/' + time.strftime('%y%m%d') + '/eject_dark'))
     args = ap.parse_args(argv)
@@ -391,6 +392,9 @@ def main(argv=None):
     plan = plan_eject(read_state(), forward=load_forward_matrix(), f_start=args.f_start,
                       f_stop=args.f_stop, sweep_s=args.sweep_s, amp_counts=args.amp_counts,
                       n_sweeps=n_sweeps, other_procs=running_guarded_scripts())
+    if args.json:
+        print(json.dumps(plan, default=float))
+        return 0
     print(json.dumps(plan, indent=1, default=float))
     if not args.dark_run:
         print("\nPLAN ONLY -- nothing was written to EPICS.")

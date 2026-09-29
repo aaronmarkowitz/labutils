@@ -772,6 +772,176 @@ def cmd_replay(args):
     return 0 if ok else 1
 
 
+CDS_PYTHON = '/var/lib/cds-conda/base/envs/cds-testing/bin/python3'
+
+
+def live_eject_plan(args):
+    """The eject plan, computed in the cds-testing env (it has yaml for the
+    forward-matrix field-uniformity check; thorcam does not). Read-only."""
+    cmd = [CDS_PYTHON, os.path.join(HERE, 'eject.py'), '--json', '--amp-counts', str(args.amp_counts),
+           '--n-sweeps', str(args.n_sweeps)]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    lines = [l for l in out.stdout.splitlines() if l.startswith('{')]
+    if not lines:
+        raise RuntimeError(f"eject plan failed: {out.stderr[-500:]}")
+    return json.loads(lines[-1])
+
+
+def frame_stats(f, trap, r):
+    """Cheap per-frame record: net flux in a box about the trap and the
+    brightest spot (4x-binned, smoothed) anywhere in the frame."""
+    bg = float(np.median(f[::8, ::8]))
+    x, y = int(trap[0]), int(trap[1])
+    box = f[max(y - r, 0):y + r, max(x - r, 0):x + r]
+    flux = float(box.sum() - bg * box.size)
+    h, w = f.shape[0] // 4 * 4, f.shape[1] // 4 * 4
+    b = f[:h, :w].reshape(h // 4, 4, w // 4, 4).mean((1, 3))
+    sm = photometry.box_smooth(b - bg, 6)
+    iy, ix = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    return flux, (4 * ix + 2, 4 * iy + 2)
+
+
+def cmd_eject(args):
+    """Real electrical eject (Alma approved 2026-09-29): x cam on the full frame
+    with a live preview in the main thread, eject.execute(allow=True) in a
+    worker thread. Ctrl-C / 'q' / the abort file stop it; execute's finally
+    always runs safe-off (gain 0 first). Verdict = full-frame occupancy after
+    the drive is off and the particle has settled."""
+    import threading
+    import eject as ej
+
+    def _term(signum, frame):
+        # SIGTERM (e.g. `timeout`) would otherwise kill Python without running the
+        # worker's safe-off; route it through the Ctrl-C path instead.
+        raise KeyboardInterrupt(f'signal {signum}')
+    signal.signal(signal.SIGTERM, _term)
+    out = args.out_dir or os.path.join(DATA_ROOT, datetime.now().strftime('%y%m%d'), 'particle_loader',
+                                       'eject_' + datetime.now().strftime('%H%M%S'))
+    log = RunLog(out)
+    plan = live_eject_plan(args)
+    log('eject_plan', **plan)
+    if plan['problems'] or not plan.get('field_uniformity'):
+        print(f"REFUSED: problems {plan['problems']}, uniformity {plan.get('field_uniformity')}")
+        return 2
+    print(f"eject: COSGAIN {plan['cosgain_counts']:.0f} (binding {plan['binding_electrode']}), "
+          f"{plan['n_sweeps']} x {plan['f_start_hz']}->{plan['f_stop_hz']} Hz; notes: {plan['notes']}")
+    if not args.go:
+        print("plan only; pass --go to drive the electrodes")
+        return 0
+    if os.path.exists(ABORT_FILE):
+        os.remove(ABORT_FILE)
+    src = make_source(args)
+    preview = Preview(not args.no_preview, None, args.r_ap)
+    it = src.frames()
+    result = None
+    try:
+        base, _ = baseline_stack(it, args.n_baseline)
+        occ, m = det_mod.occupancy(base, None, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
+                                   k_sigma=args.k_occupancy)
+        sig0 = m['net_counts'] / m['noise_floor_spatial_counts']
+        log('before', occupied=occ, at=m['center_xy'], sigma=sig0, roi=src.roi)
+        np.save(os.path.join(out, 'before_mean.npy'), base.mean(0).astype(np.float32))
+        if not occ:
+            result = f"REFUSED: no particle on the x cam (brightest {sig0:.1f} sigma)"
+            return 2
+        trap = m['center_xy']
+        del base
+        shared = {'status': 'ramping', 'want': 0, 'got': [], 'result': None, 'error': None}
+        abort_evt = threading.Event()
+        cv = threading.Condition()
+
+        def occupied():
+            with cv:
+                shared['got'], shared['want'] = [], args.n_baseline
+                ok = cv.wait_for(lambda: shared['want'] == 0 or abort_evt.is_set(), timeout=15)
+                st = np.stack(shared['got']) if ok and shared['got'] else None
+            if st is None:
+                log('occupancy_check', occupied=None, why='no frames')
+                return True                       # unknown: keep going (final check decides)
+            o, mm = det_mod.occupancy(st, None, args.r_ap, src.saturation_level,
+                                      src.exposure_us * 1e-6, k_sigma=args.k_occupancy)
+            log('occupancy_check', occupied=o, at=mm['center_xy'],
+                sigma=mm['net_counts'] / mm['noise_floor_spatial_counts'])
+            return o
+
+        def abort_check():
+            if abort_evt.is_set() or os.path.exists(ABORT_FILE):
+                raise KeyboardInterrupt('abort')
+
+        def status(msg):
+            shared['status'] = msg
+            log('eject', msg=msg)
+
+        def worker():
+            try:
+                shared['result'] = ej.execute(plan, allow=True, occupied=occupied, check_abort=abort_check,
+                                              log=status)
+            except BaseException as e:            # noqa: BLE001 -- report, safe-off already ran
+                shared['error'] = repr(e)
+
+        th = threading.Thread(target=worker, name='eject')     # non-daemon: finally must finish
+        ts, fluxes, peaks = [], [], []
+        t0 = time.time()
+        th.start()
+        try:
+            while th.is_alive():
+                f, t = next(it)
+                check_abort()
+                fl, pk = frame_stats(f, trap, args.r_ap)
+                ts.append(t - t0); fluxes.append(fl); peaks.append(pk)
+                with cv:
+                    if shared['want']:
+                        shared['got'].append(f)
+                        if len(shared['got']) >= shared['want']:
+                            shared['want'] = 0
+                            cv.notify_all()
+                preview.show(f, f"EJECT {shared['status']}  flux {fl:.3g}", center=trap)
+        except BaseException as e:
+            # ANY main-loop failure (camera, preview 'q', Ctrl-C) stops the sweep:
+            # it must never keep driving without the camera watching.
+            log('abort', why=repr(e))
+            abort_evt.set()
+            with cv:
+                cv.notify_all()
+            if not isinstance(e, (KeyboardInterrupt, Abort)):
+                raise
+        finally:
+            while th.is_alive():                  # safe-off runs in the worker's finally
+                try:
+                    th.join(0.5)
+                except KeyboardInterrupt:
+                    abort_evt.set()
+        gains = caget_all({'cos': 'Y1:DMD-PARTICLE_SPIN_COSGAIN', 'sin': 'Y1:DMD-PARTICLE_SPIN_SINGAIN'})
+        log('spin_after', **gains)
+        # settle with the drive off, then the verdict on the full frame. Fresh
+        # iterator: an interrupt raised inside the old generator has closed it.
+        it = src.frames()
+        t_end = time.time() + 3.0
+        for f, t in it:
+            preview.show(f, "settling (drive off)", center=trap)
+            if time.time() > t_end:
+                break
+        after, _ = baseline_stack(it, args.n_baseline)
+        occ2, m2 = det_mod.occupancy(after, None, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
+                                     k_sigma=args.k_occupancy)
+        sig2 = m2['net_counts'] / m2['noise_floor_spatial_counts']
+        np.save(os.path.join(out, 'after_mean.npy'), after.mean(0).astype(np.float32))
+        np.savez_compressed(os.path.join(out, 'eject_timeseries.npz'), t=np.array(ts), flux=np.array(fluxes),
+                            peak_xy=np.array(peaks), trap_xy=np.array(trap))
+        log('after', occupied=occ2, at=m2['center_xy'], sigma=sig2)
+        verdict = 'STILL TRAPPED' if occ2 else 'EJECTED (trap empty on the full frame)'
+        result = (f"eject {verdict}: before {sig0:.0f} sigma at {tuple(round(v) for v in trap)}, after "
+                  f"{sig2:.1f} sigma at {tuple(round(v) for v in m2['center_xy'])}; execute -> "
+                  f"{shared['result'] or shared['error']}; SPIN gains after {gains}")
+        return 0
+    finally:
+        preview.close()
+        src.close()
+        if result:
+            log('end', result=result)
+            alert(result + f"\nlog: {log.path}", telegram=args.telegram)
+
+
 def cmd_ledger(args):
     if args.set_mass:
         eid, pg = args.set_mass
@@ -883,6 +1053,12 @@ def build_parser():
     p.add_argument('--replay-occupied', action='store_true')
     p.add_argument('--replay-simulate-eject', action='store_true',
                    help='replay only: pretend the rejected particle was ejected, to test the loop')
+    p = sub.add_parser('eject', help='REAL electrical eject of the trapped particle (needs --go)')
+    common(p)
+    p.add_argument('--go', action='store_true', help='drive the electrodes (default: plan only)')
+    p.add_argument('--amp-counts', type=float, default=20000.0)
+    p.add_argument('--n-sweeps', type=int, default=3)
+    p.add_argument('--no-preview', action='store_true')
     p = sub.add_parser('ledger')
     p.add_argument('--ledger', default=ledger.DEFAULT_PATH)
     p.add_argument('--set-mass', nargs=2, metavar=('ID', 'PG'))
@@ -918,7 +1094,7 @@ def main(argv=None):
     if args.cmd == 'run' and args.real_moku and args.replay:
         sys.exit("--real-moku with --replay makes no sense")
     return {'identify-cams': cmd_identify, 'measure': cmd_measure, 'replay': cmd_replay,
-            'run': cmd_run, 'ledger': cmd_ledger}[args.cmd](args)
+            'run': cmd_run, 'ledger': cmd_ledger, 'eject': cmd_eject}[args.cmd](args)
 
 
 if __name__ == '__main__':
