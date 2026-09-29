@@ -13,7 +13,24 @@ quadrature); |(cos, sin)| ≤ 19212. Block estimates of ±5° below 7 Hz are a 1
 (1–2 cycles); above 7 Hz the error is < 0.7°. Sweep took ~42 s, not 30 s (caput overhead ~0.03 s/step).
 FREQ-ramps-over-TRAMP was not determined (irrelevant given the gain-first ordering).
 Data: `data/260929/eject_dark/dark_111424.{json,npz}`.
-Waiting on Alma: real eject, real chirp, merge/push/wiki.
+**REAL EJECT DONE 11:29 (Alma approved; `load_particle.py eject --go`, preview on :0):** the 10 pg
+reference particle (418σ at (784, 645)) left at t = 3.74 s, ~0.5 s into the 2 s COSGAIN ramp at
+1 Hz (≈25 % amplitude, ~5000 counts), before the sweep proper. Low vacuum: far less drive would do.
+Afterwards SPIN is back to 0 / 5000 Hz / TRAMP 5. The run went all 3 sweeps: the per-sweep occupancy
+check was fooled by a corner glow (fixed: must be ≥ 10 % of the pre-eject flux). Data:
+`data/260929/particle_loader/eject_112918/` (events, per-frame flux/peak time series, before/after
+means). The Epstein-mass reference particle is gone: `--reference-from` can't transfer the
+calibration across a future realignment without a new mass measurement.
+**Dark EMPTY full frame measured** (`data/260929/particle_loader/empty_dark_full_50ms.npz`,
+300 frames; template = before − after of the ejected particle):
+- **BLOCKS `run --roi auto`:** the pre-chirp occupancy gate reads the top-right corner glow
+  (~+0.4 counts over ~250 px, at ~(1244, 34)) as occupied in 8/10 empty 30-frame windows
+  (5.0–6.8σ). An edge mask made it worse (11.6σ on the glow shoulder) and was reverted.
+  Fix: gate on the difference against an empty dark reference, or high-pass the background.
+- Full-frame detector: 0 false candidates in 270 empty frames. Detects 0.01 (confirmed 3.0 s)
+  but NOT 0.005 or 0.003. The strip reaches 0.003, so the full frame costs ≥ 2× in B (≈230 → ~260 nm).
+  Open question for Alma: search a band around the last trap row vs the full frame.
+Waiting on Alma: the band-vs-full-frame choice, real chirp (low vacuum), merge/push/wiki.
 
 ### Goal
 Automate loading: chirp dropper → detect on x cam → cancel → photometry → size → reject

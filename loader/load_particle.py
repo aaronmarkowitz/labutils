@@ -860,8 +860,14 @@ def cmd_eject(args):
                 return True                       # unknown: keep going (final check decides)
             o, mm = det_mod.occupancy(st, None, args.r_ap, src.saturation_level,
                                       src.exposure_us * 1e-6, k_sigma=args.k_occupancy)
+            # The particle being ejected is known. The dark full frame has a
+            # top-right corner glow (~+0.4 counts over ~250 px) that scored 5.6
+            # sigma after the particle had gone (2026-09-29): a peak under 10 % of
+            # the pre-eject flux is not it.
+            o = bool(o and mm['net_counts'] >= 0.1 * m['net_counts'])
             log('occupancy_check', occupied=o, at=mm['center_xy'],
-                sigma=mm['net_counts'] / mm['noise_floor_spatial_counts'])
+                sigma=mm['net_counts'] / mm['noise_floor_spatial_counts'],
+                flux_vs_before=mm['net_counts'] / m['net_counts'])
             return o
 
         def abort_check():
@@ -924,6 +930,7 @@ def cmd_eject(args):
         after, _ = baseline_stack(it, args.n_baseline)
         occ2, m2 = det_mod.occupancy(after, None, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
                                      k_sigma=args.k_occupancy)
+        occ2 = bool(occ2 and m2['net_counts'] >= 0.1 * m['net_counts'])      # same rule as above
         sig2 = m2['net_counts'] / m2['noise_floor_spatial_counts']
         np.save(os.path.join(out, 'after_mean.npy'), after.mean(0).astype(np.float32))
         np.savez_compressed(os.path.join(out, 'eject_timeseries.npz'), t=np.array(ts), flux=np.array(fluxes),
