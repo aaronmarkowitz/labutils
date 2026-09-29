@@ -5,7 +5,15 @@
 **Status: auto-ROI (alignment-robust), circular polarisation, x-laser preflight and the
 rotating-field eject (plan + dark-run command) are in and tested. Not merged, not pushed.
 No real Moku output, no electrode drive, no CDS write. The x cam was opened read-only.**
-Waiting on Alma: approval of the eject **dark run**. Also: real chirp, real eject, merge/push/wiki.
+**Eject dark run DONE 11:14 (Alma approved):** outputs off → sweep → restored (all 8 `IN,OT,DC`,
+SPIN back to FREQ 5000 / TRAMP 5 / gains 0). POLES_E1–4_OUT_DQ excursion **0.0** (nothing reached
+a DAC). SINGAIN follows COSGAIN (both ≈19200 = A). Quadrature holds: E3 drive synthesised from
+the recorded COS/SIN peaks at **32000** exactly (the planned figure; 40037 would mean lost
+quadrature); |(cos, sin)| ≤ 19212. Block estimates of ±5° below 7 Hz are a 1 s window artefact
+(1–2 cycles); above 7 Hz the error is < 0.7°. Sweep took ~42 s, not 30 s (caput overhead ~0.03 s/step).
+FREQ-ramps-over-TRAMP was not determined (irrelevant given the gain-first ordering).
+Data: `data/260929/eject_dark/dark_111424.{json,npz}`.
+Waiting on Alma: real eject, real chirp, merge/push/wiki.
 
 ### Goal
 Automate loading: chirp dropper → detect on x cam → cancel → photometry → size → reject
