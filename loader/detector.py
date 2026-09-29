@@ -28,7 +28,7 @@ class TrapDetector:
     def __init__(self, baseline, region_center=None, region_radius=None, smooth_r=12,
                  k_sigma=6.0, persist_s=0.5, confirm_s=3.0, frac_above=0.7,
                  max_net_drift_px=60.0, max_speed_px_s=200.0, gap_reset_frames=4,
-                 destripe=True):
+                 destripe=True, exclude=None):
         base = np.asarray(baseline, dtype=float)
         if base.ndim != 3 or len(base) < 5:
             raise ValueError("baseline must be a stack of >= 5 frames")
@@ -43,6 +43,10 @@ class TrapDetector:
         b = self.smooth_r
         self.mask = ((np.hypot(xx - self.center[0], yy - self.center[1]) <= self.radius)
                      & (xx >= b) & (xx < w - b) & (yy >= b) & (yy < h - b))
+        if exclude is not None:
+            # e.g. the x cam's dark-frame corner glow, which otherwise sets the
+            # full-frame null max (97 % of frames, 2026-09-29)
+            self.mask &= ~np.asarray(exclude, bool)
         if not self.mask.any():
             raise ValueError("trap region has no pixels a full smoothing box away from the edge")
         self.destripe = bool(destripe)

@@ -23,14 +23,20 @@ means). The Epstein-mass reference particle is gone: `--reference-from` can't tr
 calibration across a future realignment without a new mass measurement.
 **Dark EMPTY full frame measured** (`data/260929/particle_loader/empty_dark_full_50ms.npz`,
 300 frames; template = before − after of the ejected particle):
-- **BLOCKS `run --roi auto`:** the pre-chirp occupancy gate reads the top-right corner glow
-  (~+0.4 counts over ~250 px, at ~(1244, 34)) as occupied in 8/10 empty 30-frame windows
-  (5.0–6.8σ). An edge mask made it worse (11.6σ on the glow shoulder) and was reverted.
-  Fix: gate on the difference against an empty dark reference, or high-pass the background.
-- Full-frame detector: 0 false candidates in 270 empty frames. Detects 0.01 (confirmed 3.0 s)
-  but NOT 0.005 or 0.003. The strip reaches 0.003, so the full frame costs ≥ 2× in B (≈230 → ~260 nm).
-  Open question for Alma: search a band around the last trap row vs the full frame.
-Waiting on Alma: the band-vs-full-frame choice, real chirp (low vacuum), merge/push/wiki.
+- Pre-chirp gate FIXED: plain annulus occupancy read the top-right corner glow (~+0.4 counts
+  over ~250 px) as occupied in 8/10 empty windows. The new full-frame gate high-passes the frame
+  (401-px box), searches ≥ 100 px from the edge, and uses k_gate 6. Real empty windows ≤ 1.4σ;
+  1 % particle 9.9σ, 2 % 20σ. Live fake-Moku run (empty, dark): gate 1.1σ → chirp started.
+- Detector, same stack: strip and full frame both detect 0.01 and miss 0.005, so the geometry costs
+  nothing at that resolution. The static 30-frame-mean template is blurrier than the 09-28 per-frame
+  replay, hence 0.01 not 0.003. Excluding the glow box (x ≥ 1000, y < 300) makes 0.007 detectable.
+- **Open, blocks real loading:** in the live fake-Moku run the detector's null std was 0.042 (the
+  recorded stack gave 0.015), and a FALSE candidate fired at (1253, 352) after 97 s, on the right
+  edge just below the glow box. Likely the glow drifting as the sensor warms. Benign (stops the
+  chirp → 'lost' → re-chirp) but it wastes attempts. Next: widen the edge/glow exclusion or
+  refresh the baseline, and re-measure on a > 3 min empty stream. Loop timing with preview:
+  median 71.6 ms, p95 78 ms (keeps up).
+Waiting on Alma: real chirp (low vacuum), merge/push/wiki.
 
 ### Goal
 Automate loading: chirp dropper → detect on x cam → cancel → photometry → size → reject

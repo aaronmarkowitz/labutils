@@ -157,3 +157,46 @@ def test_control_run_refuses_with_x_laser_on_or_unknown(monkeypatch, tmp_path, p
     monkeypatch.setattr(lp, 'make_source', lambda a: pytest.fail('opened the camera'))
     a = _args(['run', '--out-dir', str(tmp_path)])
     assert lp.cmd_run(a) == expect
+
+
+# ------------------------------------------------ dark full frame: glow + gradient
+
+def _glow_stack(n=30, seed=1, blob=0.0):
+    """Empty dark frame like the IDS x cam's (2026-09-29): left-right gradient plus a
+    top-right corner glow, Poisson noise; optional particle at (784, 645)."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:1024, :1280].astype(float)
+    img = (3.5 + 0.6 * xx / 1280
+           + 0.5 * np.exp(-(((xx - 1280) / 220) ** 2 + (yy / 220) ** 2)))   # as measured
+    if blob:
+        img = img + blob * np.exp(-((xx - 784) ** 2 + (yy - 645) ** 2) / (2 * 20 ** 2))
+    return rng.poisson(img, (n, 1024, 1280)).astype(float)
+
+
+def _gate_args():
+    return types.SimpleNamespace(roi=None, trap_xy=None, r_ap=80, k_gate=6.0, k_occupancy=5.0,
+                                 region_px=600.0)
+
+
+_SRC = types.SimpleNamespace(saturation_level=255, exposure_us=50000)
+
+
+@pytest.mark.control
+def test_control_plain_gate_reads_the_corner_glow_as_a_particle():
+    occ, m = D.occupancy(_glow_stack(), None, 80, 255, 0.05, k_sigma=5)
+    assert occ and m['center_xy'][0] > 1000 and m['center_xy'][1] < 300
+
+
+@pytest.mark.parametrize('seed', [1, 2, 3])
+def test_highpass_gate_empty_is_empty_and_finds_a_faint_particle(seed):
+    occ, m = lp.gate_occupancy(_glow_stack(seed=seed), None, _gate_args(), _SRC)
+    assert not occ
+    occ, m = lp.gate_occupancy(_glow_stack(seed=seed, blob=1.0), None, _gate_args(), _SRC)
+    assert occ and abs(m['center_xy'][0] - 784) < 15 and abs(m['center_xy'][1] - 645) < 15
+
+
+def test_glow_exclude_follows_the_roi():
+    assert lp.glow_exclude((1024, 1280), None)[:300, 1000:].all()
+    assert lp.glow_exclude((300, 1280), (0, 496, 1280, 300)) is None      # strip below the glow
+    m = lp.glow_exclude((300, 1280), (0, 100, 1280, 300))
+    assert m[:200, 1000:].all() and not m[200:].any()

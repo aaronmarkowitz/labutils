@@ -358,9 +358,7 @@ def attempt_load(src, frames_iter, args, log, preview):
     # nominal trap AND the brightest spot in the trap region (the whole frame
     # under --roi auto, where the trap position is not assumed).
     for where in ((args.trap_xy, None) if args.trap_xy is not None else (None,)):
-        occ, m = det_mod.occupancy(base, where, args.r_ap, src.saturation_level,
-                                   src.exposure_us * 1e-6, k_sigma=args.k_occupancy,
-                                   search_mask=region_mask(base.shape[1:], args))
+        occ, m = gate_occupancy(base, where, args, src)
         log('occupancy', at=m['center_xy'], occupied=occ, net_counts=m['net_counts'],
             sigma_spatial=m['noise_floor_spatial_counts'], roi=args.roi)
         if occ:
@@ -370,7 +368,8 @@ def attempt_load(src, frames_iter, args, log, preview):
                                region_radius=args.region_px if args.trap_xy is not None else None,
                                k_sigma=args.k_sigma, persist_s=args.persist_s,
                                smooth_r=args.smooth_r, destripe=not args.no_destripe,
-                               confirm_s=args.confirm_s)
+                               confirm_s=args.confirm_s,
+                               exclude=glow_exclude(base.shape[1:], args.roi))
     log('detector', **det.describe())
     dropper = DropperClient(args.conf, fake=not args.real_moku, log=print)
     log('dropper_ready', **{k: dropper.ready.get(k) for k in
@@ -547,6 +546,45 @@ def region_mask(shape, args):
     return np.hypot(xx - args.trap_xy[0], yy - args.trap_xy[1]) <= args.region_px
 
 
+# The IDS x cam's dark full frame (lights off, 50 ms) has a smooth left-right
+# gradient and a top-right corner glow (~+0.4 counts over ~250 px). Measured on
+# 300 empty frames, 2026-09-29 (data/260929/particle_loader/empty_dark_full_50ms.npz):
+# - plain annulus occupancy read the glow as a particle in 8/10 empty windows
+#   (5-7 sigma) and lost a 2 % particle to it. Full-frame gate = subtract a
+#   401-px box-smoothed background, search >= 100 px from the edge (the box
+#   smooth models corners poorly), threshold --k-gate 6: empty windows <= 1.4
+#   sigma, a 1 % particle 9.9 sigma, 2 % 20 sigma.
+# - the full-frame detector's null max sat in the glow corner in 97 % of frames;
+#   excluding it: null std 0.019 -> 0.015, detection 0.01 -> 0.007 (same stack).
+GLOW_BOX_FULL = (1000, 0, 1280, 300)     # x0, y0, x1, y1 in full-sensor pixels
+HIGHPASS_R = 200
+HIGHPASS_MARGIN = 100
+
+
+def glow_exclude(shape, roi):
+    """Boolean mask of the glow corner in these frames' pixels (None if outside)."""
+    ox, oy = (roi[0], roi[1]) if roi else (0, 0)
+    x0, y0, x1, y1 = GLOW_BOX_FULL
+    m = np.zeros(shape, bool)
+    m[max(y0 - oy, 0):max(y1 - oy, 0), max(x0 - ox, 0):max(x1 - ox, 0)] = True
+    return m if m.any() else None
+
+
+def gate_occupancy(stack, where, args, src):
+    """Is a particle in these frames? Full frame (--roi auto, trap unknown): the
+    background is high-passed first and the threshold is args.k_gate; a strip or
+    known trap position keeps the validated plain annulus test."""
+    stack = np.asarray(stack, float)
+    if args.roi is None and where is None:
+        bg = photometry.box_smooth(stack.mean(0), HIGHPASS_R)
+        inner = np.zeros(stack.shape[1:], bool)
+        inner[HIGHPASS_MARGIN:-HIGHPASS_MARGIN, HIGHPASS_MARGIN:-HIGHPASS_MARGIN] = True
+        return det_mod.occupancy(stack - bg[None], None, args.r_ap, src.saturation_level,
+                                 src.exposure_us * 1e-6, k_sigma=args.k_gate, search_mask=inner)
+    return det_mod.occupancy(stack, where, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
+                             k_sigma=args.k_occupancy, search_mask=region_mask(stack.shape[1:], args))
+
+
 def to_full(xy, roi):
     """ROI pixel -> full-sensor pixel."""
     if xy is None:
@@ -666,8 +704,7 @@ def cmd_measure(args):
         if args.auto_roi and not args.from_npy:
             # find the trapped particle as the brightest object on the full frame
             stack, _ = src.grab(src.exposure_us, args.n_baseline)
-            occ, m = det_mod.occupancy(stack.astype(float), None, args.r_ap, src.saturation_level,
-                                       src.exposure_us * 1e-6, k_sigma=args.k_occupancy)
+            occ, m = gate_occupancy(stack, None, args, src)
             log('locate', at=m['center_xy'], occupied=occ, net_counts=m['net_counts'],
                 sigma_spatial=m['noise_floor_spatial_counts'])
             del stack
@@ -836,8 +873,7 @@ def cmd_eject(args):
     result = None
     try:
         base, _ = baseline_stack(it, args.n_baseline)
-        occ, m = det_mod.occupancy(base, None, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
-                                   k_sigma=args.k_occupancy)
+        occ, m = gate_occupancy(base, None, args, src)
         sig0 = m['net_counts'] / m['noise_floor_spatial_counts']
         log('before', occupied=occ, at=m['center_xy'], sigma=sig0, roi=src.roi)
         np.save(os.path.join(out, 'before_mean.npy'), base.mean(0).astype(np.float32))
@@ -858,8 +894,7 @@ def cmd_eject(args):
             if st is None:
                 log('occupancy_check', occupied=None, why='no frames')
                 return True                       # unknown: keep going (final check decides)
-            o, mm = det_mod.occupancy(st, None, args.r_ap, src.saturation_level,
-                                      src.exposure_us * 1e-6, k_sigma=args.k_occupancy)
+            o, mm = gate_occupancy(st, None, args, src)
             # The particle being ejected is known. The dark full frame has a
             # top-right corner glow (~+0.4 counts over ~250 px) that scored 5.6
             # sigma after the particle had gone (2026-09-29): a peak under 10 % of
@@ -928,8 +963,7 @@ def cmd_eject(args):
             if time.time() > t_end:
                 break
         after, _ = baseline_stack(it, args.n_baseline)
-        occ2, m2 = det_mod.occupancy(after, None, args.r_ap, src.saturation_level, src.exposure_us * 1e-6,
-                                     k_sigma=args.k_occupancy)
+        occ2, m2 = gate_occupancy(after, None, args, src)
         occ2 = bool(occ2 and m2['net_counts'] >= 0.1 * m['net_counts'])      # same rule as above
         sig2 = m2['net_counts'] / m2['noise_floor_spatial_counts']
         np.save(os.path.join(out, 'after_mean.npy'), after.mean(0).astype(np.float32))
@@ -1022,6 +1056,8 @@ def build_parser():
         p.add_argument('--n-baseline', type=int, default=30)
         p.add_argument('--k-sigma', type=float, default=6.0)
         p.add_argument('--k-occupancy', type=float, default=5.0)
+        p.add_argument('--k-gate', type=float, default=6.0,
+                       help='full-frame (high-passed) occupancy threshold, sigma')
         p.add_argument('--smooth-r', type=int, default=25,
                        help='detector box-smoothing half-width (px). 25 confirmed a 0.3%%-of-'
                             'reference particle in replay (12: 0.5%%) with no false candidate '
