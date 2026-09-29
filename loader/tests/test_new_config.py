@@ -124,11 +124,13 @@ def test_spread_curve_identity_at_zero_and_fills_dips():
 
 # ------------------------------------------------------------------------ ROI
 
-def test_roi_default_converts_trap_to_roi_pixels(monkeypatch):
+def test_fixed_roi_converts_trap_to_roi_pixels(monkeypatch):
+    # The default became --roi auto on 2026-09-29 (test_alignment.py); an explicit
+    # strip keeps the 2026-09-28 behaviour.
     seen = {}
     monkeypatch.setattr(lp, 'cmd_ledger', lambda a: seen.setdefault('a', a) and 0)
     monkeypatch.setattr(lp, 'cmd_measure', lambda a: seen.setdefault('a', a) and 0)
-    lp.main(['measure'])
+    lp.main(['measure', '--roi'] + [str(v) for v in lp.DEFAULT_ROI])
     a = seen['a']
     assert a.roi == lp.DEFAULT_ROI
     assert a.trap_xy == (lp.TRAP_XY[0] - lp.DEFAULT_ROI[0], lp.TRAP_XY[1] - lp.DEFAULT_ROI[1])

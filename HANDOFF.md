@@ -1,70 +1,75 @@
 # HANDOFF — labutils
 
-## §0 Current session (2026-09-28, branch `feat/particle-loader`)
+## §0 Current session (2026-09-29, branch `feat/particle-loader`)
 
-**Status: loader rebuilt for the new x-cam configuration and tested up to the eject step
-(replay + fake Moku). Not merged, not pushed. No real Moku output, no electrode drive.
-Camera IDS SN 4103314187 opened read-only.**
+**Status: auto-ROI (alignment-robust), circular polarisation, x-laser preflight and the
+rotating-field eject (plan + dark-run command) are in and tested. Not merged, not pushed.
+No real Moku output, no electrode drive, no CDS write. The x cam was opened read-only.**
+Waiting on Alma: approval of the eject **dark run**. Also: real chirp, real eject, merge/push/wiki.
 
 ### Goal
-Automate loading: chirp dropper → detect particle on x cam → cancel → photometry → size
-estimate → reject ≥1 µm / accept sub-µm → alert. Eject stays disabled until agreed.
+Automate loading: chirp dropper → detect on x cam → cancel → photometry → size → reject
+≥1 µm / accept sub-µm → alert. Eject only on Alma's say-so; real chirp not approved yet.
 
-### New configuration (Alma, 2026-09-28 pm)
-Room lights off, camera covered, z laser 200 → 500 µW (POZ_INMON 4296 → 9875).
-Loader default ROI `(0, 500, 1280, 300)`: full width, because the trap z (horizontal
-on the x cam) varies. The trap particle sits at ROI (788, 145), i.e. full frame (788, 645).
+### Decisions (Alma)
+- 09-28: lights off, camera covered, z 500 µW; reject ≥1 µm; `--size-spread 0.1` (clusters).
+- 09-29: IDS SN 4103314187 **is** the x cam. z laser **circular** → `--pol-deg circular`
+  default (linear available on request). Load with the **x laser off** (`run` refuses if
+  POX_INMON > 200 unless `--x-laser-on-ok`). Eject = 1→60 Hz sweep, rotating in x-y,
+  |E| normalised by the actuator gains, ≤32000 counts on any DAC.
 
-### Verified this pass (data: `~/Dropbox/.../data/260928/particle_loader/newconfig_lightsoff_500uW/`)
-- **POZ normalisation holds:** B = 2.45e5 at r_ap 80 vs reference 2.424e5 (1.01; live
-  `measure --roi` 2.40e5; recorded-stack `measure` 2.48e5). cps ×2.33 for POZ ×2.30.
-  So reference `260928_153227_67f7` stays valid.
-- Background 0.07 counts/ms/px (was 2.2). Temporal aperture σ ≈ 190 counts/frame at 50 ms.
-- **Detection** (replay of real frames, fake quantisation fixed): confirmed down to
-  B/B_ref = 0.003 with smooth_r 25 (0.005 at 12). No false candidate in 1170 frames (66 s)
-  of the particle-free left strip. The right strip raises false candidates from the
-  trapped particle's halo; that can't happen mid-chirp, because the trap is empty then.
-- **Sizing:** annulus photometry is limited by fixed-pattern background, 5σ ≈ 0.026–0.033.
-  NEW difference photometry against the pre-chirp empty baseline recovers injected flux
-  to within a few % down to 0.003 (5σ floor ≈ 0.004 at 50 ms, 60 frames). It is used when
-  annulus significance < 20σ_sp. The control (annulus on the same injection) is biased by ~−130 counts.
-- **Rule (Alma):** reject ≥ 1 µm, accept sub-µm (`--accept-max-nm 1000`). Worst-case
-  dimmest ≥1 µm sphere on a fine Mie grid: 0.043 (ideal spheres, pol 0, 1096 nm dip);
-  0.31 with a 10 % log-normal size spread. decide() table: `newconfig.../decide_table.py`
-  output in the session report. spread 0: accept for B/B_ref ≲ 0.035, and the reference
-  itself is *ambiguous*. spread 0.1: accept ≲ 0.1–0.3, reject B = 1 ([1351, 2252] nm).
-- Smallest detectable sphere at 0.003: ~160–180 nm (pol 90), ~205–225 (pol 45),
-  ~265–310 (pol 0). Size of a single ~100 nm nanodiamond: B/B_ref ~1e-4, still undetectable.
-- G4 loop on new data (fake Moku, r_ap 50, spread 0.1): reference-like particle → reject →
-  simulated eject → 1 % particle detected, stopped at 0.50 s, sized by difference photometry
-  (38.7σ, measured ratio 0.0099) → ACCEPT [212, 307] nm → alert.
-- G5 live, all defaults, fake Moku: occupied (brightest-spot and fixed checks) → no chirp →
-  B 2.49e5 (1.03 × ref) → ambiguous under spread 0 → stop. `size_model.py --self-test` PASSED.
-- A "no-particle" result (detector confirmed, photometry < 5σ) now STOPS and alerts instead of
-  re-chirping: it is most likely a real 0.003–0.005 particle.
-- Tests: pytest 175 passed / 4 skipped; `-m control` 18 passed.
+### Done this pass (09-29)
+- **`--roi auto` (default).** Empty trap: detect on the FULL frame. On a particle
+  (occupancy or confirm): narrow the AOI and baseline to a 300-row full-width strip about
+  the brightest object (`narrow_to_strip`); photometry keeps the validated strip geometry.
+  `trap_full_xy` goes in every ledger entry; |dy| > 40 px vs the reference → warning plus
+  "CALIBRATION MAY BE STALE" in the decision. `--roi X Y W H` keeps the fixed strip.
+  Live timing (read-only): camera 13.9 fps at 1280×1024 / 50 ms; full-frame detector loop
+  median 71.4 ms = frame period, p95 85 ms, lag 40 ms that does not accumulate. The strip
+  AOI switch plus exposure re-apply works live.
+- **`measure --reference-from ID`** (after a realignment, the same particle): copies the
+  Epstein size and marks the old row `superseded_by`; `ledger.references` skips it (control test).
+- **Circular pol** = mean(0°, 90°) in `size_model` (self-test identity; = pol 45 exactly on
+  this cone). Smallest detectable at B/B_ref 0.003: **231 nm** circular; linear-y would give
+  207 nm at the same absolute floor (NOT the 160–180 nm stated 09-28, which normalised each
+  pol to its own reference). The 10 pg reference is 0.27× as bright under linear-y, so
+  switching pol needs a new reference; entries now record `pol_model`.
+  decide(), spread 0.1, circular: accept B/B_ref ≤ 0.2, ambiguous ~0.3, reject ≥ 0.5.
+- **Eject** (`loader/eject.py`): PARTICLE_SPIN cdsOsc → ACTS cols 6/7. Live plan
+  (read-only): COSGAIN 19212, E3 binds at 32000 (quadrature); field min/max 0.99973,
+  −360°/cycle; problems []. If quadrature were lost, E3 → 40037 (> DAC clip): the dark
+  run checks this. `--dark-run`: spin cells ACTS_{1..4}_{6,7} OUTPUT off, read back, and
+  refuse unless all 8 read off. Then the real sequence while NDS2 records
+  ACTS_1_{6,7}_IN1 (COS/SIN) and POLES_E*_OUT_DQ (must stay static). Restore only after
+  COSGAIN/SINGAIN read 0; otherwise the cells stay OFF. Analysis: amplitude, f, quadrature error.
+- `--from-npy` reads `.npz`. G4 replay (fake Moku, r_ap 50, scratch reference): reject →
+  eject plan → simulated eject → 1 % particle, chirp stop 0.56 s → ACCEPT [237, 268] nm.
+- Tests: pytest 202 passed / 4 skipped; `-m control` 30 passed; size_model self-test PASSED.
 
-### Fixed this pass
-Replay rounding deleted sub-count signals (now `synth.requantize`, stochastic).
-Detector searched edge pixels (the null max was always at the frame edge). A NaN noise floor gave
-significance = inf (now NaN → ambiguous). References were not matched on r_ap. The aperture started
-at the detector's bright-side position (~50 px off) and lost 20–60 % of the flux (now re-centred).
-A 'no-particle' guard stops a noise "confirm" from being accepted. Occupancy also tests the
-brightest spot in the region (the trap z varies).
-Tried and removed: a per-frame gain fit (made false alarms worse; errors-in-variables).
-Kept but with no measured effect: row destripe (`--no-destripe`).
+### Not verified / caveats
+- **Full-frame detection threshold in the dark is unmeasured.** Today the lab was lit
+  (12 counts/ms/px, saturated at 50 ms), so `full_50ms.npz` in
+  `data/260929/particle_loader/` is a lit scene, useless for thresholds. The 0.003 figure
+  is for the strip; the full frame has 3.4× the pixels (look-elsewhere) → re-measure in the dark.
+- In the lit frame the brightest spot was at (789, 643), which matches the particle position of 09-28.
+- Dark-run unknowns: oscillator quadrature through FREQ steps; whether FREQ ramps over TRAMP;
+  whether SINGAIN follows COSGAIN.
 
-### Open (Alma's calls)
-`--size-spread` default now 0.1 (clusters; Alma chose 2026-09-28). Still open: x-cam identity;
-z polarisation vs x-cam axis; x laser on during loading?; eject procedure; merge/push/wiki.
+### 09-28 results still standing
+POZ normalisation holds (B 2.45e5 vs reference 2.424e5, `260928_153227_67f7`). Background
+0.07 counts/ms/px in the dark. Detection to B/B_ref 0.003 (smooth_r 25), no false
+candidate in 66 s. Difference photometry sizes to ~0.004. A no-particle result stops the loop.
+Data: `~/Dropbox/.../data/260928/particle_loader/newconfig_lightsoff_500uW/`.
 
-### Next commands (thorcam env, from `loader/`)
-    conda run --no-capture-output -n thorcam python load_particle.py measure            # re-measure (ROI default)
-    conda run --no-capture-output -n thorcam python load_particle.py run                # fake Moku
-    conda run --no-capture-output -n thorcam python load_particle.py run --real-moku    # real chirp (after approval)
-    # replay a new-config stack (strip ROI):
-    python load_particle.py replay --replay <dir>/long400.npz --replay-particle-xy 786 144 \
-        --replay-scene-xy 280 150 --replay-half 270 --replay-half-y 150 --replay-exposure-us 49996 --replay-fps 17.87
+### Next commands (worker1)
+    # eject plan (read-only) / dark run (WRITES CDS -- only with Alma's go):
+    /var/lib/cds-conda/base/envs/cds-testing/bin/python3 loader/eject.py
+    /var/lib/cds-conda/base/envs/cds-testing/bin/python3 loader/eject.py --dark-run
+    # in the dark with the trap EMPTY: fake-Moku run measures full-frame loop timing + threshold
+    cd loader && conda run --no-capture-output -n thorcam python load_particle.py run
+    # after a beam realignment, same particle trapped:
+    conda run --no-capture-output -n thorcam python load_particle.py measure --reference-from 260928_153227_67f7
+    # replay (strip): see git log 7fc9744 / tests; needs --r-ap 50 with an r_ap-50 reference
 
 ## §1 Previous session (2026-09-10, branch `harness-2026-09`, since merged in 9fb86a6)
 

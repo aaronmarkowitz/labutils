@@ -68,13 +68,16 @@ def references(rows, camera_serial=None, x_laser_on=None, r_ap=None):
     """(B, d_ref_m, id) for rows with an independent size, optionally restricted
     to the same camera, x-laser state and photometry aperture (the reference is
     only valid for the same illumination, imaging and aperture: the aberrated PSF
-    has wide wings, so r_ap 50 holds ~half the r_ap 80 flux)."""
+    has wide wings, so r_ap 50 holds ~half the r_ap 80 flux). Rows marked
+    superseded_by (measure --reference-from, after a realignment) are skipped."""
     from size_model import diameter_from_mass
     out = []
     for r in rows:
         B = r.get('brightness')
         if B is None:
             continue
+        if r.get('superseded_by'):
+            continue          # re-referenced after a realignment: a different calibration epoch
         if camera_serial is not None and r.get('camera_serial') != camera_serial:
             continue
         if x_laser_on is not None and r.get('x_laser_on') is not None and r['x_laser_on'] != x_laser_on:

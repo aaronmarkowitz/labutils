@@ -8,8 +8,11 @@ and the beam waist, none of which we know well. The ledger's reference particles
 model supplies the shape of brightness vs diameter.
 
 Geometry: beam along +z, linearly polarised at angle `pol_deg` from the
-camera axis's azimuth, camera looking along an axis at 90 deg to the beam. With
-the polarisation unknown the band over pol in {0, 90 deg} is reported.
+camera axis's azimuth, camera looking along an axis at 90 deg to the beam.
+pol_deg = 'circular' (the z laser, Alma 2026-09-29) is the incoherent mean of the
+0 and 90 deg signals: circular light is two equal orthogonal linear components in
+quadrature, and the time-averaged intensity has no cross term. It assumes a stable
+circular state; for a drifting linear state pass the band pols=(0, 45, 90).
 
 Caveats (stated in every estimate): a cluster of nanodiamonds is not a sphere and
 scatters less per unit mass than a solid sphere of the same mass; below ~lambda/3
@@ -124,8 +127,11 @@ def collected_signal(d_m, wavelength_m=980e-9, n_particle=N_DIAMOND_980, n_mediu
     pol_deg: incident polarisation angle measured from the camera axis (x) in the
     x-y plane. 90 = polarisation perpendicular to the viewing direction (dipole
     radiates maximally toward the camera); 0 = along it (Rayleigh signal
-    vanishes on axis).
+    vanishes on axis). 'circular' = mean of 0 and 90.
     """
+    if pol_deg == 'circular':
+        return 0.5 * sum(collected_signal(d_m, wavelength_m, n_particle, n_medium, na, p)
+                         for p in (0.0, 90.0))
     k = 2 * math.pi * n_medium / wavelength_m
     x = k * d_m / 2
     m = n_particle / n_medium
@@ -245,6 +251,13 @@ def _checks(m_golden=1.55):
     got = collected_signal(d, na=na, pol_deg=90.0)
     out.append(('Absolute dCsca/dOmega*Omega', abs(got / (dcs * omega) - 1) < 0.01,
                 f'ratio={got / (dcs * omega):.4f}'))
+    # 7b. Circular = mean of the two linear states, and ~ pol 45 (exact on axis)
+    for d in (100e-9, 1.76e-6):
+        c = collected_signal(d, pol_deg='circular')
+        m2 = 0.5 * (collected_signal(d, pol_deg=0.0) + collected_signal(d, pol_deg=90.0))
+        c45 = collected_signal(d, pol_deg=45.0)
+        out.append((f'Circular = mean(0, 90) ~ 45 at {d * 1e9:.0f} nm',
+                    abs(c / m2 - 1) < 1e-12 and abs(c / c45 - 1) < 0.02, f'circ/45={c / c45:.4f}'))
     # 8. Inversion round trip in the monotonic regime
     refs = [(1.0, 1.76e-6)]
     for d_true in (100e-9, 300e-9):
@@ -272,10 +285,11 @@ def self_test():
 
 def _table():
     d_ref = diameter_from_mass(10e-15)
+    pols = (0, 45, 90, 'circular')
     print(f"10 pg diamond sphere -> d = {d_ref * 1e6:.3f} um")
-    print(f"{'d (nm)':>8} {'mass (fg)':>10} " + ' '.join(f'{"B/Bref pol" + str(p):>14}' for p in (0, 45, 90)))
+    print(f"{'d (nm)':>8} {'mass (fg)':>10} " + ' '.join(f'{"B/Bref " + str(p):>14}' for p in pols))
     for d in (50e-9, 100e-9, 200e-9, 300e-9, 500e-9, 800e-9, 1e-6, 1.76e-6, 3e-6):
-        rs = [predicted_ratio(d, d_ref, pol_deg=p) for p in (0, 45, 90)]
+        rs = [predicted_ratio(d, d_ref, pol_deg=p) for p in pols]
         print(f"{d * 1e9:8.0f} {mass_from_diameter(d) * 1e18:10.3g} " + ' '.join(f'{r:14.3e}' for r in rs))
 
 

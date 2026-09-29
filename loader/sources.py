@@ -18,13 +18,29 @@ class LiveSource:
         self.cam = cam
         self.serial = cam.serial
         self.saturation_level = cam.saturation_level
-        if roi is not None:
-            cam.set_roi(*roi)
-        self.exposure_us = cam.set_exposure_us(exposure_us)
+        self.exposure_us = exposure_us
+        self.set_roi(roi)
+
+    def set_roi(self, roi):
+        """roi (x, y, w, h) on the sensor, or None for the full frame. The
+        exposure is re-applied: the IDS frame-rate range depends on the AOI."""
+        if roi is None:
+            self.cam.reset_roi()
+        else:
+            self.cam.set_roi(*roi)
+        self.roi = tuple(self.cam.roi)
+        self.exposure_us = self.cam.set_exposure_us(self.exposure_us)
+        # Drain frames queued under the old AOI so grab() never stacks mixed shapes.
+        for f, _ in self.cam.stream():
+            if f.shape == (self.roi[3], self.roi[2]):
+                break
+        return self.roi
 
     def frames(self):
+        # Frames already queued under a previous AOI have the old shape: skip them.
         for f, t in self.cam.stream():
-            yield f.astype(float), t
+            if f.shape == (self.roi[3], self.roi[2]):
+                yield f.astype(float), t
 
     def grab(self, exposure_us, n):
         got = self.cam.set_exposure_us(exposure_us)
